@@ -248,12 +248,13 @@ class Database:
         await self._write("UPDATE progress SET want_since = NULL WHERE student_id = ?", (student_id,))
 
     async def unlink(self, student_id: int) -> int | None:
-        """Отвязывает Telegram от человека (например, если выбрал не себя). Возвращает отвязанный chat_id."""
+        """Отвязывает Telegram от человека (например, если выбрал не себя). Роль остаётся за ФИО.
+        Возвращает отвязанный chat_id."""
         student = await self.get_student(student_id)
         if not student or not student.linked:
             return None
         await self._write(
-            "UPDATE students SET chat_id = NULL, username = NULL, role = 'user' WHERE id = ?", (student_id,)
+            "UPDATE students SET chat_id = NULL, username = NULL WHERE id = ?", (student_id,)
         )
         return student.chat_id
 
