@@ -105,16 +105,54 @@ def test_live_queue(tmp_path):
     run(go())
 
 
-def test_want_keeps_time_on_repeat(tmp_path):
+def test_lot_is_drawn_once_and_reset_after_done(tmp_path):
     async def go():
         db = await make_db(tmp_path)
         await db.add_students(["Первый Пётр", "Второй Иван"])
-        s = await ids(db)
+        sid = (await ids(db))["Первый"]
         bd = await subject_id(db, "БД")
-        await db.set_want(s["Первый"], bd, True)
-        await db.set_want(s["Второй"], bd, True)
-        await db.set_want(s["Первый"], bd, True)
-        assert [r.student_id for r in await db.queue(bd)] == [s["Первый"], s["Второй"]]
+
+        async def lot():
+            return (await db.get_row(bd, sid))[1].lot
+
+        await db.set_want(sid, bd, True)
+        first = await lot()
+        assert first is not None
+        await db.set_want(sid, bd, True)
+        await db.set_want(sid, bd, False)
+        await db.set_want(sid, bd, True)
+        assert await lot() == first  # опустил и поднял руку — жребий тот же, перебросить нельзя
+        await db.change_done(sid, bd, 1)
+        assert await lot() is None  # «Сдал» — на следующую работу жребий бросится заново
+        await db.set_want(sid, bd, True)
+        assert await lot() is not None
+        await db.close()
+    run(go())
+
+
+def test_lot_column_added_to_existing_db_without_data_loss(tmp_path):
+    # База как на сервере до этой версии: без колонки lot, с группой и поднятой рукой.
+    conn = sqlite3.connect(tmp_path / "queue.db")
+    conn.executescript(
+        "CREATE TABLE students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, "
+        "active INTEGER NOT NULL DEFAULT 1, chat_id INTEGER UNIQUE, username TEXT, role TEXT NOT NULL DEFAULT 'user');"
+        "CREATE TABLE subjects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, total INTEGER NOT NULL);"
+        "CREATE TABLE progress (student_id INTEGER NOT NULL, subject_id INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0, "
+        "want_since TEXT, PRIMARY KEY (student_id, subject_id));"
+        "INSERT INTO students (name, chat_id) VALUES ('Иванов Иван', 5);"
+        "INSERT INTO subjects (name, total) VALUES ('БД', 6);"
+        "INSERT INTO progress VALUES (1, 1, 2, '2026-10-27T10:00:00');"
+        "PRAGMA user_version = 4;"
+    )
+    conn.close()
+
+    async def go():
+        db = await make_db(tmp_path)
+        assert [s.name for s in await db.students()] == ["Иванов Иван"]
+        assert (await db.student_by_chat(5)).name == "Иванов Иван"
+        row = (await db.get_row(1, 1))[1]
+        assert row.done == 2 and row.wants and row.lot is not None  # жребий выдан уже поднятой руке
+        assert [s.name for s in await db.subjects()] == ["БД"]  # предметы не пересеяны
         await db.close()
     run(go())
 

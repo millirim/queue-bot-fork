@@ -442,7 +442,7 @@ async def show_progress_card(
         await cb.answer("Не найдено", show_alert=True)
         return
     place, row = found
-    want = f"\n{WANT} хочет сдать следующим" if row.wants else ""
+    want = f"\n{WANT} хочет сдать следующее" if row.wants else ""
     p = ":p" if from_person else ""
     back = btn("⬅️ К человеку", f"au:{student_id}") if from_person else btn("⬅️ К очереди", f"aqs:{subject_id}")
     rows = [
