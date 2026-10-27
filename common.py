@@ -119,11 +119,11 @@ def queue_text(subject: Subject, rows: list[Row], me: int | None = None) -> str:
     wanting = sum(r.wants for r in rows)
     for i, r in enumerate(rows, 1):
         if i == 1 and wanting:
-            text += f"\n{WANT} <b>Хотят сдать следующими:</b>\n"
+            text += f"\n{WANT} <b>Хотят сдать следующее:</b>\n"
         if i == wanting + 1:
             text += "\n<b>Остальные</b> (меньше сдано — выше):\n" if wanting else "\n"
         mark = " 👈 <i>это ты</i>" if r.student_id == me else ""
         text += f"{i}. {esc(r.name)} — {r.done}/{subject.total}{mark}\n"
     if not wanting:
-        text += f"\n<i>Пока никто не нажал «{WANT} Хочу сдать следующим».</i>"
+        text += f"\n<i>Пока никто не нажал «{WANT} Хочу сдать следующее».</i>"
     return text

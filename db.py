@@ -7,7 +7,7 @@ from datetime import datetime
 import aiosqlite
 
 import config
-from ranking import Row, order
+from ranking import Row, draw_lot, order
 
 log = logging.getLogger(__name__)
 
@@ -40,12 +40,13 @@ CREATE TABLE IF NOT EXISTS subjects (
     total INTEGER NOT NULL
 );
 
--- Сколько человек сдал по предмету и хочет ли сдать следующим.
+-- Сколько человек сдал по предмету и хочет ли сдать следующее.
 CREATE TABLE IF NOT EXISTS progress (
     student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     done       INTEGER NOT NULL DEFAULT 0,
-    want_since TEXT,                        -- ISO-время «хочу сдать следующим», NULL — не хочет
+    want_since TEXT,                        -- когда нажал «хочу сдать следующее», NULL — не хочет
+    lot        INTEGER,                     -- жребий среди равных (ranking.draw_lot), до «Сдал»
     PRIMARY KEY (student_id, subject_id)
 );
 
@@ -144,6 +145,7 @@ class Database:
         await self.conn.executescript(SCHEMA)
         await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
+        await self._add_lot_column()
         await self._seed_subjects()
 
     async def _drop_old_schema(self) -> None:
@@ -154,6 +156,18 @@ class Database:
             for t in OLD_TABLES:
                 await self.conn.execute(f"DROP TABLE IF EXISTS {t}")
             await self.conn.commit()
+
+    async def _add_lot_column(self) -> None:
+        """Жребий появился позже: добавляем колонку в уже существующую базу, данные не трогаем."""
+        columns = {r["name"] for r in await self._all("PRAGMA table_info(progress)")}
+        if "lot" not in columns:
+            await self.conn.execute("ALTER TABLE progress ADD COLUMN lot INTEGER")
+        for r in await self._all("SELECT student_id, subject_id FROM progress WHERE want_since IS NOT NULL AND lot IS NULL"):
+            await self.conn.execute(
+                "UPDATE progress SET lot = ? WHERE student_id = ? AND subject_id = ?",
+                (draw_lot(), r["student_id"], r["subject_id"]),
+            )
+        await self.conn.commit()
 
     async def _seed_subjects(self) -> None:
         if (await self._one("SELECT COUNT(*) AS c FROM subjects"))["c"]:
@@ -323,13 +337,12 @@ class Database:
     async def queue(self, subject_id: int) -> list[Row]:
         """Вся группа по предмету в порядке очереди (ranking.order)."""
         rows = await self._all(
-            "SELECT s.id, s.name, COALESCE(p.done, 0) AS done, p.want_since FROM students s "
+            "SELECT s.id, s.name, COALESCE(p.done, 0) AS done, p.want_since, p.lot FROM students s "
             "LEFT JOIN progress p ON p.student_id = s.id AND p.subject_id = ? WHERE s.active = 1",
             (subject_id,),
         )
         return order([
-            Row(r["id"], r["name"], r["done"], datetime.fromisoformat(r["want_since"]) if r["want_since"] else None)
-            for r in rows
+            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, r["lot"]) for r in rows
         ])
 
     async def get_row(self, subject_id: int, student_id: int) -> tuple[int, Row] | None:
@@ -347,10 +360,11 @@ class Database:
     async def set_want(self, student_id: int, subject_id: int, want: bool) -> None:
         await self._ensure_progress(student_id, subject_id)
         if want:
-            # Повторное нажатие не двигает время — место среди желающих сохраняется.
+            # Жребий бросается один раз и не перебрасывается, если опустить и поднять руку снова.
             await self._write(
-                "UPDATE progress SET want_since = COALESCE(want_since, ?) WHERE student_id = ? AND subject_id = ?",
-                (local_now().isoformat(timespec="microseconds"), student_id, subject_id),
+                "UPDATE progress SET want_since = COALESCE(want_since, ?), lot = COALESCE(lot, ?) "
+                "WHERE student_id = ? AND subject_id = ?",
+                (local_now().isoformat(timespec="seconds"), draw_lot(), student_id, subject_id),
             )
         else:
             await self._write(
@@ -359,15 +373,16 @@ class Database:
 
     async def change_done(self, student_id: int, subject_id: int, delta: int) -> int | None:
         """Меняет число сданных на delta (в пределах 0..всего работ). «Сдал» (+1) снимает отметку
-        «хочу сдать». Возвращает новое число или None, если менять некуда."""
+        «хочу сдать» и жребий — на следующую работу он бросится заново. Возвращает новое число или None."""
         subject = await self.get_subject(subject_id)
         if subject is None:
             return None
         await self._ensure_progress(student_id, subject_id)
         changed = await self._write(
-            "UPDATE progress SET done = done + ?, want_since = CASE WHEN ? > 0 THEN NULL ELSE want_since END "
+            "UPDATE progress SET done = done + ?, want_since = CASE WHEN ? > 0 THEN NULL ELSE want_since END, "
+            "lot = CASE WHEN ? > 0 THEN NULL ELSE lot END "
             "WHERE student_id = ? AND subject_id = ? AND done + ? BETWEEN 0 AND ?",
-            (delta, delta, student_id, subject_id, delta, subject.total),
+            (delta, delta, delta, student_id, subject_id, delta, subject.total),
         )
         if not changed:
             return None

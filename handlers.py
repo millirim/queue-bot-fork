@@ -196,7 +196,7 @@ async def show_queue(target: Message | CallbackQuery, db: Database, student: Stu
     if me and me.wants:
         buttons.append([btn("↩️ Передумал сдавать", f"sw:{subject.id}:0")])
     elif me and me.done < subject.total:
-        buttons.append([btn(f"{WANT} Хочу сдать следующим", f"sw:{subject.id}:1")])
+        buttons.append([btn(f"{WANT} Хочу сдать следующее", f"sw:{subject.id}:1")])
     if me:
         row = []
         if me.done < subject.total:
