@@ -1,5 +1,6 @@
 """Админка в боте (/admin). Староста: заявки, ФИО, правка сданных, рассылка, журнал.
-Админ (ADMIN_IDS) — ещё список группы, старосты, отвязка аккаунтов и предметы.
+Админ — ещё список группы, роли (студент/староста/админ), отвязка аккаунтов и предметы.
+Главные админы (ADMIN_IDS в настройках сервера) — как админы, но их нельзя снять из бота.
 Каждое действие пишется в журнал, а тому, кого оно касается, приходит уведомление."""
 from dataclasses import dataclass
 
@@ -11,9 +12,9 @@ from aiogram.types import CallbackQuery, Message
 
 import config
 from common import (
-    btn, check_name, esc, is_admin, kb, queue_text, rows_of, send, send_many, short_name, show, works,
+    btn, check_name, esc, is_admin, is_owner, kb, queue_text, rows_of, send, send_many, short_name, show, works,
 )
-from db import Database, Request, Student, parse_roster
+from db import ROLES, Database, Request, Student, parse_roster
 from ranking import WANT
 
 router = Router()
@@ -44,7 +45,7 @@ class Staff:
 
 async def get_staff(chat_id: int, full_name: str, db: Database) -> Staff | None:
     student = await db.student_by_chat(chat_id)
-    if is_admin(chat_id):
+    if is_admin(chat_id, student):
         return Staff(chat_id, student.name if student else full_name, True)
     if student and student.starosta:
         return Staff(chat_id, student.name, False)
@@ -115,7 +116,7 @@ def request_text(r: Request, full_name: str = "") -> str:
 
 async def notify_reviewers(bot: Bot, db: Database, request: Request, full_name: str) -> None:
     """Новая заявка — старостам и всем админам."""
-    reviewers = sorted(config.ADMIN_IDS | set(await db.starostas()))
+    reviewers = sorted(config.ADMIN_IDS | set(await db.staff_chats()))
     await send_many(
         bot, reviewers,
         f"📨 <b>Новая заявка</b>\n\nTelegram {request_text(request, full_name)}\nЭто правда этот человек?",
@@ -181,6 +182,8 @@ async def cb_review(cb: CallbackQuery, db: Database):
 
 # ================= люди =================
 def person_icon(s: Student) -> str:
+    if is_owner(s.chat_id or 0) or s.admin:
+        return "🛠"
     return "⭐" if s.starosta else ("📱" if s.linked else "▫️")
 
 
@@ -193,7 +196,7 @@ async def show_people(target: Message | CallbackQuery, db: Database, staff: Staf
         extra.append([btn("➕ Добавить людей", "apa"), btn("🗂 Убранные", "api")])
     text = (
         f"👥 <b>Группа</b> — {len(students)} чел., в боте {in_bot}.\n"
-        "⭐ староста · 📱 в боте · ▫️ ещё не зашёл в бота.\nНажми на человека, чтобы открыть карточку."
+        "🛠 админ · ⭐ староста · 📱 в боте · ▫️ ещё не зашёл в бота.\nНажми на человека, чтобы открыть карточку."
     )
     if not students:
         text = "👥 Список группы пуст. Нажми «Добавить людей» и вставь список."
@@ -268,7 +271,7 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
         tg = f"в боте: {tg}"
     else:
         tg = "ещё не зашёл в бота"
-    role = "староста ⭐" if s.starosta else "студент"
+    role = role_title(s)
     text = f"👤 <b>{esc(s.name)}</b>\n{tg}\nРоль: {role}" + ("" if s.active else "\n🗂 <b>убран из группы</b>")
     progress = []
     if s.active:
@@ -279,8 +282,11 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
                                 f"aqe:{subj.id}:{s.id}:p"))
     rows = [*rows_of(progress), [btn("✏️ Исправить ФИО", f"aun:{s.id}")]]
     if staff.admin:
+        if s.active and s.linked and not is_owner(s.chat_id):
+            rows.append([
+                btn(("✓ " if s.role == role else "") + ROLE_BUTTONS[role], f"aur:{s.id}:{role}") for role in ROLES
+            ])
         if s.active and s.linked:
-            rows.append([btn("Снять старосту" if s.starosta else "⭐ Сделать старостой", f"aur:{s.id}")])
             rows.append([btn("🔓 Отвязать Telegram", f"aul:{s.id}")])
         rows.append([btn("🗂 Убрать из группы", f"aux:{s.id}")] if s.active else [btn("↩️ Вернуть в группу", f"auv:{s.id}")])
     rows.append([btn("⬅️ К группе", "ap"), ADMIN_BTN])
@@ -322,26 +328,42 @@ async def admin_name(msg: Message, state: FSMContext, db: Database):
     await show_person(msg, db, staff, await db.get_student(s.id))
 
 
-@router.callback_query(F.data.regexp(r"^aur:\d+$"))
+ROLE_BUTTONS = {"user": "🎓 Студент", "starosta": "⭐ Староста", "admin": "🛠 Админ"}
+ROLE_NAMES = {"user": "студент", "starosta": "староста", "admin": "админ"}
+ROLE_NOTES = {
+    "user": "Админка тебе больше недоступна.",
+    "starosta": "Тебе будут приходить заявки, а в меню есть кнопка «🛠 Админка» (или команда /admin): "
+                "заявки, ФИО, сданные, рассылка, журнал.",
+    "admin": "В админке тебе доступно всё: список группы, роли, предметы. Кнопка «🛠 Админка» "
+             "в меню или команда /admin.",
+}
+
+
+def role_title(s: Student) -> str:
+    if is_owner(s.chat_id or 0):
+        return "главный админ 🛠 (из настроек сервера)"
+    return {"admin": "админ 🛠", "starosta": "староста ⭐"}.get(s.role, "студент") if s.linked else "студент"
+
+
+@router.callback_query(F.data.regexp(r"^aur:\d+:(user|starosta|admin)$"))
 async def cb_person_role(cb: CallbackQuery, db: Database):
-    if not (staff := await need_staff(cb, db, admin_only=True)) or not (s := await load_student(cb, db, int(cb.data[4:]))):
+    _, student_id, role = cb.data.split(":")
+    if not (staff := await need_staff(cb, db, admin_only=True)) or not (s := await load_student(cb, db, int(student_id))):
         return
-    if not s.linked:
-        await cb.answer("Старостой можно сделать только того, кто есть в боте", show_alert=True)
+    if not s.linked or not s.active:
+        await cb.answer("Роль можно дать только тому, кто есть в боте", show_alert=True)
         return
-    if s.starosta:
-        await db.set_role(s.id, "user")
-        await journal_add(db, staff, f"{s.name} больше не староста")
-        await notify(cb.bot, s, f"Ты больше не староста ({esc(staff.signature)}).")
-    else:
-        await db.set_role(s.id, "starosta")
-        await journal_add(db, staff, f"{s.name} назначен(а) старостой")
-        await notify(
-            cb.bot, s,
-            f"⭐ Тебя назначили старостой ({esc(staff.signature)}).\n"
-            "Тебе будут приходить заявки, а в меню появилась кнопка «🛠 Админка» (или команда /admin).",
-        )
-    await show_person(cb, db, staff, await db.get_student(s.id))
+    if is_owner(s.chat_id):
+        await cb.answer("Это главный админ из настроек сервера — его роль в боте не меняется", show_alert=True)
+        return
+    if s.role == role:
+        await cb.answer(f"Уже {ROLE_NAMES[role]}")
+        return
+    await db.set_role(s.id, role)
+    await journal_add(db, staff, f"роль {s.name}: {ROLE_NAMES[s.role]} → {ROLE_NAMES[role]}")
+    await notify(cb.bot, s, f"Твоя роль теперь — <b>{ROLE_NAMES[role]}</b> ({esc(staff.signature)}).\n{ROLE_NOTES[role]}")
+    await cb.answer(f"Теперь {ROLE_NAMES[role]}")
+    await show_person(cb, db, staff, await db.get_student(s.id), ack=False)
 
 
 @router.callback_query(F.data.regexp(r"^aul:\d+$"))

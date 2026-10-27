@@ -165,7 +165,10 @@ def test_remove_restore_unlink(tmp_path):
         bd = await subject_id(db, "БД")
         await db.link(5, "ivan", sid)
         await db.set_role(sid, "starosta")
-        assert await db.starostas() == [5]
+        assert await db.staff_chats() == [5]
+        await db.set_role(sid, "admin")
+        assert (await db.get_student(sid)).admin and await db.staff_chats() == [5]
+        await db.set_role(sid, "starosta")
         await db.change_done(sid, bd, 1)
         await db.set_want(sid, bd, True)
 

@@ -16,13 +16,19 @@ log = logging.getLogger(__name__)
 
 
 # --- права ---
-def is_admin(chat_id: int) -> bool:
+def is_owner(chat_id: int) -> bool:
+    """Главный админ — из ADMIN_IDS в настройках сервера. Его нельзя снять из бота."""
     return chat_id in config.ADMIN_IDS
+
+
+def is_admin(chat_id: int, student: Student | None = None) -> bool:
+    """Главный админ или админ, назначенный в боте."""
+    return is_owner(chat_id) or bool(student and student.admin)
 
 
 def is_staff(chat_id: int, student: Student | None) -> bool:
     """Староста или админ — видит админку."""
-    return is_admin(chat_id) or bool(student and student.starosta)
+    return is_admin(chat_id, student) or bool(student and student.starosta)
 
 
 def check_name(text: str) -> tuple[str, str | None]:

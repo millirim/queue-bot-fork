@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS students (
     active   INTEGER NOT NULL DEFAULT 1,   -- 0 — убран из группы (например, отчислен)
     chat_id  INTEGER UNIQUE,               -- привязанный Telegram; NULL — ещё не в боте
     username TEXT,
-    role     TEXT NOT NULL DEFAULT 'user'  -- user / starosta
+    role     TEXT NOT NULL DEFAULT 'user'  -- user / starosta / admin
 );
 
 -- Заявки «этот аккаунт Telegram — вот этот человек из списка».
@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS audit (
 OLD_TABLES = ("payments", "queue", "lessons", "works", "users", "audit", "progress", "requests", "subjects", "students")
 
 
+ROLES = ("user", "starosta", "admin")
+
+
 @dataclass
 class Student:
     id: int
@@ -80,6 +83,11 @@ class Student:
     @property
     def starosta(self) -> bool:
         return self.active and self.linked and self.role == "starosta"
+
+    @property
+    def admin(self) -> bool:
+        """Админ, назначенный в боте (главные админы — в ADMIN_IDS, их здесь нет)."""
+        return self.active and self.linked and self.role == "admin"
 
 
 @dataclass
@@ -250,11 +258,12 @@ class Database:
         return student.chat_id
 
     async def set_role(self, student_id: int, role: str) -> None:
-        assert role in ("user", "starosta")
+        assert role in ROLES
         await self._write("UPDATE students SET role = ? WHERE id = ?", (role, student_id))
 
-    async def starostas(self) -> list[int]:
-        return [s.chat_id for s in await self.students() if s.starosta]
+    async def staff_chats(self) -> list[int]:
+        """Telegram старост и назначенных в боте админов — им приходят заявки."""
+        return [s.chat_id for s in await self.students() if s.starosta or s.admin]
 
     async def member_chats(self) -> list[int]:
         """Telegram всех из группы, кто есть в боте."""
