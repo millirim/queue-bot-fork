@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Управление ботом на сервере. Справка: queue-bot help
+set -euo pipefail
+
+# Весь код — внутри функции: bash прочитает её целиком, и обновление этого же файла
+# посреди работы (git reset в update) ничего не сломает.
+main() {
+    source /opt/queue-bot/deploy/common.sh
+    local cmd="${1:-help}"
+    case "$cmd" in
+        update)  need_root queue-bot update; update ;;
+        status)  systemctl status queue-bot --no-pager -n 0 || true; echo; echo "Версия: $(version)" ;;
+        logs)    journalctl -u queue-bot -f -n 50 ;;
+        restart) need_root queue-bot restart
+                 restart_and_check && say "Бот перезапущен ✓" || die "Бот не запустился: queue-bot logs" ;;
+        stop)    need_root queue-bot stop; systemctl stop queue-bot; say "Бот остановлен" ;;
+        start)   need_root queue-bot start; systemctl start queue-bot; say "Бот запущен" ;;
+        backup)  need_root queue-bot backup; systemctl start queue-bot-backup.service
+                 journalctl -u queue-bot-backup -n 1 -o cat --no-pager ;;
+        config)  need_root queue-bot config; "${EDITOR:-nano}" "$CONF"
+                 restart_and_check && say "Настройки применены ✓" || die "Бот не запустился: queue-bot logs" ;;
+        version) version ;;
+        *) cat <<HELP
+queue-bot — управление ботом очереди
+
+  sudo queue-bot update    обновить из GitHub (бэкап базы, откат, если не запустился)
+  queue-bot status         работает ли бот и какая версия
+  queue-bot logs           логи в реальном времени (выход — Ctrl+C)
+  sudo queue-bot restart   перезапустить
+  sudo queue-bot stop      остановить        sudo queue-bot start   запустить
+  sudo queue-bot backup    сделать бэкап базы сейчас
+  sudo queue-bot config    изменить токен/админов (откроется редактор)
+
+Где что лежит:
+  код        $CODE
+  настройки  $CONF
+  база       $DATA/queue.db   (бэкапы — $DATA/backups)
+HELP
+        ;;
+    esac
+}
+
+update() {
+    cd "$CODE"
+    say "Проверяю обновления"
+    git fetch -q origin
+    local old new
+    old=$(git rev-parse HEAD)
+    new=$(git rev-parse '@{u}')
+    if [[ $old == "$new" ]]; then
+        echo "Уже последняя версия: $(version)"
+        return
+    fi
+    echo "Что нового:"
+    git log --format='  • %s' --no-merges "$old..$new"
+
+    say "Бэкап базы"
+    systemctl start queue-bot-backup.service || echo "⚠️  Бэкап не удался — продолжаю"
+
+    say "Обновляю"
+    git reset -q --hard "$new"
+    apply_code
+    if restart_and_check; then
+        say "Готово ✓ Версия: $(version). Настройки и база не тронуты."
+        return
+    fi
+    journalctl -u queue-bot -n 30 --no-pager || true
+    say "Новая версия не запустилась — возвращаю прошлую"
+    git reset -q --hard "$old"
+    apply_code
+    restart_and_check || true
+    die "Обновление отменено, работает прошлая версия. Пришли лог выше разработчику."
+}
+
+main "$@"
+exit

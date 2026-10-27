@@ -1,5 +1,5 @@
 [Unit]
-Description=Telegram-бот электронной очереди
+Description=Telegram-бот живой очереди
 After=network-online.target
 Wants=network-online.target
 
@@ -8,17 +8,20 @@ User=queuebot
 Group=queuebot
 WorkingDirectory=/opt/queue-bot
 ExecStart=/opt/queue-bot/.venv/bin/python main.py
-Environment=PYTHONUNBUFFERED=1
+# База — в /var/lib/queue-bot (systemd создаёт папку сам), настройки — в /etc/queue-bot/env.
+StateDirectory=queue-bot
+StateDirectoryMode=0750
+Environment=DB_PATH=/var/lib/queue-bot/queue.db PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/queue-bot/env
 # Упал или пропал интернет — перезапуск через 10 секунд.
 Restart=always
 RestartSec=10
 
-# Бот может писать только в свою базу, остальная система для него только на чтение.
+# Бот может писать только в свою папку с данными; код и система для него только на чтение.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/queue-bot/data
 
 [Install]
 WantedBy=multi-user.target

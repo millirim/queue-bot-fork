@@ -4,7 +4,18 @@ import sqlite3
 import pytest
 
 import config
-from db import Database
+from db import Database, parse_roster
+
+ROSTER = """№	Фамилия Имя Отчество
+1
+Антонович Антон Николаевич
+2
+Базык Серафим Олегович
+3
+Будников Максим Алексеевич
+26
+Трифонов Григорий Андреевич (отчислен с 04.09.2026)
+"""
 
 
 def run(coro):
@@ -17,8 +28,8 @@ async def make_db(tmp_path) -> Database:
     return db
 
 
-async def add_user(db: Database, chat_id: int, name: str):
-    await db.save_request(chat_id, None, name, approved=True)
+async def ids(db: Database) -> dict[str, int]:
+    return {s.name.split()[0]: s.id for s in await db.students()}
 
 
 async def subject_id(db: Database, name: str) -> int:
@@ -30,56 +41,66 @@ def _no_env_admins(monkeypatch):
     monkeypatch.setattr(config, "ADMIN_IDS", set())
 
 
-def test_subjects_seeded_from_config(tmp_path):
+def test_parse_roster_skips_numbers_header_and_expelled():
+    assert parse_roster(ROSTER) == [
+        "Антонович Антон Николаевич", "Базык Серафим Олегович", "Будников Максим Алексеевич",
+    ]
+
+
+def test_roster_add_and_queue_has_everyone(tmp_path):
     async def go():
         db = await make_db(tmp_path)
-        assert {s.name: s.total for s in await db.subjects()} == config.SUBJECTS
-        await db.close()
-    run(go())
-
-
-def test_request_flow(tmp_path):
-    async def go():
-        db = await make_db(tmp_path)
-        user = await db.save_request(1, "ivan", "Иванов Иван", approved=False)
-        assert user.status == "pending"
-        assert [u.chat_id for u in await db.pending_requests()] == [1]
-        assert await db.queue(await subject_id(db, "БД")) == []  # до принятия в очереди нет
-        assert (await db.review(1, True)).approved
-        assert await db.review(1, False) is None
-        assert await db.name_taken("иванов иван", except_chat_id=2)  # кириллица без учёта регистра
-        await db.close()
-    run(go())
-
-
-def test_live_queue_whole_group(tmp_path):
-    async def go():
-        db = await make_db(tmp_path)
+        names = parse_roster(ROSTER)
+        added, existing = await db.add_students(names)
+        assert len(added) == 3 and existing == []
+        assert (await db.add_students(names))[1] == names  # повторно не дублирует
         bd = await subject_id(db, "БД")
-        for chat_id, name in ((1, "Петров Пётр"), (2, "Сидоров Сидор"), (3, "Орлов Олег")):
-            await add_user(db, chat_id, name)
-        # Вся группа в списке сразу, у всех 0 — по алфавиту.
-        assert [r.chat_id for r in await db.queue(bd)] == [3, 1, 2]
+        # В очереди вся группа, даже кто не в боте; при равных 0 — по алфавиту.
+        assert [r.name.split()[0] for r in await db.queue(bd)] == ["Антонович", "Базык", "Будников"]
+        await db.close()
+    run(go())
 
-        assert await db.change_done(1, bd, 1) == 1
-        assert await db.change_done(1, bd, 1) == 2
-        assert await db.change_done(2, bd, 1) == 1
-        assert [r.chat_id for r in await db.queue(bd)] == [3, 2, 1]
 
-        await db.set_want(1, bd, True)
-        await db.set_want(2, bd, True)
-        # Желающие сверху: у Сидорова сдано меньше — он первый.
-        assert [r.chat_id for r in await db.queue(bd)] == [2, 1, 3]
+def test_request_link_and_conflicts(tmp_path):
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_students(["Антонович Антон Николаевич", "Базык Серафим Олегович"])
+        s = await ids(db)
+        await db.create_request(10, "anton", s["Антонович"])
+        await db.create_request(11, "fake", s["Антонович"])  # кто-то пытается занять то же имя
+        assert len(await db.pending_requests()) == 2
+        student = await db.approve(10)
+        assert student.chat_id == 10 and (await db.student_by_chat(10)).name.startswith("Антонович")
+        assert await db.approve(11) == "Это ФИО уже занято другим аккаунтом — заявка удалена"
+        assert await db.get_request(11) is None
+        assert await db.approve(11) == "Эту заявку уже рассмотрели"
+        assert [x.name.split()[0] for x in await db.free_students()] == ["Базык"]
+        assert await db.reject(12) is None
+        await db.close()
+    run(go())
 
-        # «Сдал» снимает отметку и прибавляет 1.
-        assert await db.change_done(2, bd, 1) == 2
+
+def test_live_queue(tmp_path):
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_students(["Петров Пётр", "Сидоров Сидор", "Орлов Олег"])
+        s = await ids(db)
+        bd = await subject_id(db, "БД")
+        assert await db.change_done(s["Петров"], bd, 1) == 1
+        assert await db.change_done(s["Петров"], bd, 1) == 2
+        assert await db.change_done(s["Сидоров"], bd, 1) == 1
+        assert [r.student_id for r in await db.queue(bd)] == [s["Орлов"], s["Сидоров"], s["Петров"]]
+
+        await db.set_want(s["Петров"], bd, True)
+        await db.set_want(s["Сидоров"], bd, True)
+        assert [r.student_id for r in await db.queue(bd)] == [s["Сидоров"], s["Петров"], s["Орлов"]]
+
+        assert await db.change_done(s["Сидоров"], bd, 1) == 2  # «Сдал» снимает отметку
         queue = await db.queue(bd)
-        assert [r.chat_id for r in queue] == [1, 3, 2]
+        assert [r.student_id for r in queue] == [s["Петров"], s["Орлов"], s["Сидоров"]]
         assert not queue[2].wants
-
-        # −1 отметку не трогает.
-        assert await db.change_done(1, bd, -1) == 1
-        assert (await db.get_row(bd, 1))[1].wants
+        assert await db.change_done(s["Петров"], bd, -1) == 1  # −1 отметку не трогает
+        assert (await db.get_row(bd, s["Петров"]))[1].wants
         await db.close()
     run(go())
 
@@ -87,66 +108,58 @@ def test_live_queue_whole_group(tmp_path):
 def test_want_keeps_time_on_repeat(tmp_path):
     async def go():
         db = await make_db(tmp_path)
+        await db.add_students(["Первый Пётр", "Второй Иван"])
+        s = await ids(db)
         bd = await subject_id(db, "БД")
-        await add_user(db, 1, "Первый Пётр")
-        await add_user(db, 2, "Второй Иван")
-        await db.set_want(1, bd, True)
-        await db.set_want(2, bd, True)
-        await db.set_want(1, bd, True)  # повторное нажатие не отправляет в конец
-        assert [r.chat_id for r in await db.queue(bd)] == [1, 2]
-        await db.set_want(1, bd, False)
-        assert [r.chat_id for r in await db.queue(bd)] == [2, 1]
+        await db.set_want(s["Первый"], bd, True)
+        await db.set_want(s["Второй"], bd, True)
+        await db.set_want(s["Первый"], bd, True)
+        assert [r.student_id for r in await db.queue(bd)] == [s["Первый"], s["Второй"]]
         await db.close()
     run(go())
 
 
-def test_done_limits_and_subject_changes(tmp_path):
+def test_remove_restore_unlink(tmp_path):
     async def go():
         db = await make_db(tmp_path)
-        await add_user(db, 1, "Иванов Иван")
-        assert await db.add_subject("Курсач", 1)
-        assert not await db.add_subject("Курсач", 2)
-        k = await subject_id(db, "Курсач")
-        assert await db.change_done(1, k, -1) is None  # меньше нуля нельзя
-        assert await db.change_done(1, k, 1) == 1
-        assert await db.change_done(1, k, 1) is None  # больше, чем всего работ, нельзя
+        await db.add_students(["Иванов Иван"])
+        sid = (await ids(db))["Иванов"]
+        bd = await subject_id(db, "БД")
+        await db.link(5, "ivan", sid)
+        await db.set_role(sid, "starosta")
+        assert await db.starostas() == [5]
+        await db.change_done(sid, bd, 1)
+        await db.set_want(sid, bd, True)
 
+        await db.set_active(sid, False)
+        assert await db.queue(bd) == [] and await db.student_by_chat(5) is None
+        await db.set_active(sid, True)
+        row = (await db.get_row(bd, sid))[1]
+        assert row.done == 1 and not row.wants  # сданные сохранились, отметка снята
+
+        assert await db.unlink(sid) == 5
+        assert await db.student_by_chat(5) is None and not (await db.get_student(sid)).starosta
+        await db.close()
+    run(go())
+
+
+def test_subject_limits(tmp_path):
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_students(["Иванов Иван"])
+        sid = (await ids(db))["Иванов"]
+        assert await db.add_subject("Курсач", 1) and not await db.add_subject("Курсач", 2)
+        k = await subject_id(db, "Курсач")
+        assert await db.change_done(sid, k, -1) is None
+        assert await db.change_done(sid, k, 1) == 1
+        assert await db.change_done(sid, k, 1) is None
         bd = await subject_id(db, "БД")
         for _ in range(5):
-            await db.change_done(1, bd, 1)
-        await db.set_subject_total(bd, 3)  # уменьшили число работ — счётчик обрезается
-        assert (await db.get_row(bd, 1))[1].done == 3
-
-        assert await db.rename_subject(k, "Курсовая")
-        assert not await db.rename_subject(k, "БД")
+            await db.change_done(sid, bd, 1)
+        await db.set_subject_total(bd, 3)
+        assert (await db.get_row(bd, sid))[1].done == 3
         await db.delete_subject(k)
         assert await db.get_subject(k) is None
-        await db.close()
-    run(go())
-
-
-def test_exclude_hides_from_queue(tmp_path):
-    async def go():
-        db = await make_db(tmp_path)
-        bd = await subject_id(db, "БД")
-        await add_user(db, 1, "Иванов Иван")
-        await db.change_done(1, bd, 1)
-        await db.set_want(1, bd, True)
-        await db.exclude(1)
-        assert await db.queue(bd) == []
-        await db.save_request(1, None, "Иванов Иван", approved=True)
-        row = (await db.get_row(bd, 1))[1]
-        assert row.done == 1 and not row.wants  # сданные сохранились, отметка снята
-        await db.close()
-    run(go())
-
-
-def test_journal(tmp_path):
-    async def go():
-        db = await make_db(tmp_path)
-        await db.log_action(1, "админ А", "первое")
-        await db.log_action(1, "админ А", "второе")
-        assert [r.text for r in await db.journal()] == ["второе", "первое"]
         await db.close()
     run(go())
 
@@ -154,15 +167,26 @@ def test_journal(tmp_path):
 def test_old_schema_is_replaced(tmp_path):
     conn = sqlite3.connect(tmp_path / "queue.db")
     conn.executescript(
-        "CREATE TABLE users (chat_id INTEGER PRIMARY KEY, name TEXT NOT NULL, group_no TEXT);"
-        "CREATE TABLE lessons (id INTEGER PRIMARY KEY); PRAGMA user_version = 2;"
+        "CREATE TABLE users (chat_id INTEGER PRIMARY KEY, name TEXT NOT NULL);"
+        "CREATE TABLE progress (chat_id INTEGER, subject_id INTEGER); PRAGMA user_version = 3;"
     )
     conn.close()
 
     async def go():
         db = await make_db(tmp_path)
-        await add_user(db, 1, "Иванов Иван")
         tables = {r["name"] for r in await db._all("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert "lessons" not in tables and (await db.get_user(1)).approved
+        assert "users" not in tables and "students" in tables
+        await db.add_students(["Иванов Иван"])
+        await db.close()
+    run(go())
+
+
+def test_data_survives_reconnect(tmp_path):
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_students(["Иванов Иван"])
+        await db.close()
+        db = await make_db(tmp_path)  # как перезапуск после обновления
+        assert [s.name for s in await db.students()] == ["Иванов Иван"]
         await db.close()
     run(go())

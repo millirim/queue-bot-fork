@@ -1,13 +1,13 @@
 [Unit]
-Description=Бэкап базы бота электронной очереди
+Description=Бэкап базы бота живой очереди
 
 [Service]
 Type=oneshot
 User=queuebot
 Group=queuebot
-ExecStart=/bin/bash /opt/queue-bot/deploy/backup.sh
+StateDirectory=queue-bot
+ExecStart=/opt/queue-bot/.venv/bin/python /opt/queue-bot/deploy/backup.py
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/queue-bot/data /opt/queue-bot/backups

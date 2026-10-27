@@ -1,66 +1,88 @@
 #!/usr/bin/env bash
-# Установка бота на Debian (12/13) как службы systemd.
-# Запуск из склонированного репозитория:  sudo bash deploy/install.sh
-# Повторный запуск безопасен: настройки и база не трогаются.
+# Установка бота на Debian 12/13 как службы systemd:  sudo bash deploy/install.sh
+# Повторный запуск безопасен: настройки и база не трогаются, код обновляется до последнего.
+# Потом всё делается командой queue-bot (справка: queue-bot help).
 set -euo pipefail
 
-APP_DIR=/opt/queue-bot
-APP_USER=queuebot
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KEY_NAME=queue-bot   # ключ ~/.ssh/queue-bot — нужен, только если репозиторий приватный
+main() {
+    local src_dir repo
+    src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    source "$src_dir/deploy/common.sh"
+    need_root bash deploy/install.sh
 
-say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
-die() { printf '\n\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
-as_bot() { runuser -u "$APP_USER" -- "$@"; }
+    # Откуда скачан этот код — оттуда и будут приходить обновления.
+    repo=$(git config --file "$src_dir/.git/config" remote.origin.url 2>/dev/null \
+        || echo https://github.com/millirim/queue-bot-fork.git)
 
-[[ $EUID -eq 0 ]] || die "Запусти через sudo: sudo bash deploy/install.sh"
+    say "Ставлю пакеты (python3, venv, git, curl)"
+    apt-get update -q
+    apt-get install -y -q python3 python3-venv git curl ca-certificates
+    python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "Нужен Python 3.11 или новее"
 
-say "Ставлю пакеты (python3, venv, git, curl)"
-apt-get update -q
-apt-get install -y -q python3 python3-venv git curl ca-certificates
-python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "Нужен Python 3.11 или новее"
+    say "Проверяю доступ к Telegram"
+    curl -sS -m 15 -o /dev/null https://api.telegram.org || die "Нет доступа к api.telegram.org — бот не сможет работать"
 
-say "Проверяю доступ в интернет"
-curl -sS -m 15 -o /dev/null https://api.telegram.org || die "Нет доступа к api.telegram.org — бот не сможет работать"
-
-say "Создаю пользователя $APP_USER (без root-прав и без входа в систему)"
-id -u "$APP_USER" &>/dev/null \
-    || useradd --system --no-create-home --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
-
-if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
-    if [[ -d "$APP_DIR/.git" ]]; then
-        echo "$APP_DIR уже есть — оставляю как есть (для обновления: sudo bash $APP_DIR/deploy/update.sh)"
+    say "Пользователь $APP_USER (без root-прав и без входа в систему)"
+    if id -u "$APP_USER" &>/dev/null; then
+        usermod -d "$DATA" "$APP_USER"
     else
-        # Простое копирование: git от root отказывается работать с папкой другого пользователя.
-        say "Копирую бота в $APP_DIR"
-        install -d "$APP_DIR"
-        cp -a "$SRC_DIR/." "$APP_DIR/"
-        rm -rf "$APP_DIR/.venv"  # пути внутри venv привязаны к старой папке — создадим заново
+        useradd --system --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin "$APP_USER"
     fi
-fi
 
-# Если репозиторий приватный: копия ключа того, кто запускает установку (для обновлений).
-KEY_SRC="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)/.ssh/$KEY_NAME"
-if [[ -f "$KEY_SRC" && ! -f "$APP_DIR/.ssh/id_ed25519" ]]; then
-    say "Настраиваю ключ доступа к GitHub для обновлений"
-    install -d -m 700 "$APP_DIR/.ssh"
-    install -m 600 "$KEY_SRC" "$APP_DIR/.ssh/id_ed25519"
-fi
+    migrate_old_layout
 
-install -d "$APP_DIR/data" "$APP_DIR/backups"
-chown -R "$APP_USER:$APP_USER" "$APP_DIR"
-if [[ -f "$APP_DIR/.ssh/id_ed25519" ]]; then
-    as_bot git -C "$APP_DIR" config core.sshCommand \
-        "ssh -i $APP_DIR/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$APP_DIR/.ssh/known_hosts"
-fi
+    say "Код → $CODE"
+    if [[ -d "$CODE/.git" ]]; then
+        chown -R root:root "$CODE"
+        # Старая копия может смотреть в другой репозиторий или ветку — переключаем на основную ветку $repo.
+        local branch
+        git -C "$CODE" remote set-url origin "$repo"
+        git -C "$CODE" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+        git -C "$CODE" fetch -q --prune origin
+        git -C "$CODE" remote set-head origin -a >/dev/null
+        branch=$(git -C "$CODE" rev-parse --abbrev-ref origin/HEAD)
+        git -C "$CODE" checkout -q -f -B "${branch#origin/}" "$branch"
+        git -C "$CODE" clean -q -fdx -e .venv  # остатки старых версий (данные теперь лежат не здесь)
+    else
+        rm -rf "$CODE"
+        git clone -q "$repo" "$CODE"
+    fi
+    apply_code
 
-say "Ставлю зависимости в отдельное окружение (.venv)"
-[[ -x "$APP_DIR/.venv/bin/python" ]] || as_bot python3 -m venv "$APP_DIR/.venv"
-as_bot "$APP_DIR/.venv/bin/pip" install -q --no-cache-dir --upgrade pip
-as_bot "$APP_DIR/.venv/bin/pip" install -q --no-cache-dir -r "$APP_DIR/requirements.txt"
+    configure
 
-if [[ ! -f "$APP_DIR/.env" ]]; then
-    say "Настройки бота"
+    say "Запускаю"
+    systemctl enable -q queue-bot.service queue-bot-backup.timer
+    systemctl start queue-bot-backup.timer
+    if restart_and_check; then
+        say "Готово, бот работает ✓  Версия: $(version)"
+        journalctl -u queue-bot -n 3 -o cat --no-pager || true
+        echo
+        "$CODE/deploy/queue-bot" help
+    else
+        journalctl -u queue-bot -n 30 --no-pager || true
+        die "Бот не запустился — смотри лог выше"
+    fi
+}
+
+# Прошлая версия установки хранила настройки и базу внутри папки с кодом.
+migrate_old_layout() {
+    [[ -f "$CODE/.env" && ! -f "$CONF" ]] || return 0
+    say "Переношу настройки из старой установки в $CONF"
+    install -d -m 700 "$CONF_DIR"
+    grep -E '^(BOT_TOKEN|ADMIN_IDS|TIMEZONE)=' "$CODE/.env" > "$CONF" || true
+    chmod 600 "$CONF"
+    systemctl stop queue-bot.service 2>/dev/null || true
+    rm -rf "$CODE"  # база старой версии несовместима, код скачаем заново
+}
+
+configure() {
+    if [[ -f "$CONF" ]] && grep -q '^BOT_TOKEN=.' "$CONF"; then
+        echo "Настройки уже есть в $CONF — оставляю (изменить: sudo queue-bot config)"
+        return
+    fi
+    say "Настройки бота (вводятся один раз)"
+    local token me admins
     while true; do
         read -rsp "Токен бота от @BotFather (ввод скрыт): " token; echo
         if me=$(curl -sS -m 15 "https://api.telegram.org/bot${token}/getMe") && [[ $me == *'"ok":true'* ]]; then
@@ -71,44 +93,13 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     done
     while true; do
         read -rp "Твой Telegram ID (узнать у @userinfobot; несколько — через запятую): " admins
+        admins=${admins// /}
         [[ $admins =~ ^[0-9]+(,[0-9]+)*$ ]] && break
         echo "✗ Нужны только цифры, например 123456789"
     done
-    umask 077
-    cat > "$APP_DIR/.env" <<EOF
-BOT_TOKEN=$token
-ADMIN_IDS=$admins
-DB_PATH=data/queue.db
-TIMEZONE=Europe/Minsk
-EOF
-    chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
-    chmod 600 "$APP_DIR/.env"
-else
-    echo "Файл $APP_DIR/.env уже есть — оставляю"
-fi
+    install -d -m 700 "$CONF_DIR"
+    (umask 077; printf 'BOT_TOKEN=%s\nADMIN_IDS=%s\nTIMEZONE=Europe/Minsk\n' "$token" "$admins" > "$CONF")
+}
 
-say "Ставлю службы systemd"
-install -m 644 "$APP_DIR"/deploy/queue-bot.service "$APP_DIR"/deploy/queue-bot-backup.service \
-    "$APP_DIR"/deploy/queue-bot-backup.timer /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable -q queue-bot.service queue-bot-backup.timer
-systemctl restart queue-bot.service
-systemctl start queue-bot-backup.timer
-
-sleep 5
-if systemctl is-active -q queue-bot.service; then
-    say "Готово, бот работает ✓"
-    journalctl -u queue-bot -n 5 --no-pager
-    cat <<EOF
-
-Полезные команды:
-  journalctl -u queue-bot -f           — логи в реальном времени (выход: Ctrl+C)
-  systemctl status queue-bot           — состояние
-  sudo systemctl restart queue-bot     — перезапуск
-  sudo bash $APP_DIR/deploy/update.sh  — обновить бота из GitHub
-  sudo nano $APP_DIR/.env              — настройки (после правки — перезапуск)
-EOF
-else
-    journalctl -u queue-bot -n 30 --no-pager
-    die "Бот не запустился — смотри лог выше"
-fi
+main "$@"
+exit
