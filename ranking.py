@@ -20,7 +20,7 @@ RULES = (
 
 @dataclass
 class Row:
-    chat_id: int
+    student_id: int
     name: str
     done: int                    # сколько работ сдано
     want_since: datetime | None  # когда нажал «хочу сдать следующим»; None — не нажимал

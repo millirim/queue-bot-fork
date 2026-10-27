@@ -32,5 +32,5 @@ def test_rest_with_equal_done_alphabetically():
 
 def test_order_is_stable_and_complete():
     rows = [Row(i, f"Человек{i}", i % 3, T if i % 2 else None) for i in range(20)]
-    assert sorted(r.chat_id for r in order(rows)) == list(range(20))
+    assert sorted(r.student_id for r in order(rows)) == list(range(20))
     assert order(rows) == order(list(reversed(rows)))

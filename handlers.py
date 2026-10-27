@@ -1,31 +1,25 @@
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import config
 from admin import notify_reviewers
-from common import btn, check_name, esc, is_admin, is_staff, kb, queue_text, rows_of, show
-from db import Database, User
+from common import btn, esc, is_admin, is_staff, kb, queue_text, rows_of, show
+from db import Database, Student
 from ranking import RULES, WANT
 
 router = Router()
-
-
-class Reg(StatesGroup):
-    name = State()
-
 
 # ================= вспомогательное =================
 MENU_BTN = btn("🔙 В главное меню", "menu")
 
 
-async def main_menu(db: Database, chat_id: int, user: User | None) -> InlineKeyboardMarkup:
+async def main_menu(db: Database, chat_id: int, student: Student | None) -> InlineKeyboardMarkup:
     """Главное меню: предметы, мои сданные; старостам и админам — админка."""
     subjects = [btn(f"📋 {s.name}", f"s:{s.id}") for s in await db.subjects()]
     rows = rows_of(subjects) + [[btn("📊 Мои сданные", "my"), btn("👤 Профиль", "profile")]]
-    if is_staff(chat_id, user):
+    if is_staff(chat_id, student):
         rows.append([btn("🛠 Админка", "adm")])
     return kb(*rows)
 
@@ -45,69 +39,91 @@ HELP = (
 )
 
 
-async def require_user(target: Message | CallbackQuery, state: FSMContext, db: Database) -> User | None:
-    """Пользователь с принятой заявкой. Иначе — регистрация или сообщение о статусе заявки."""
-    user = await db.get_user(target.from_user.id)
-    if user is None:
-        await start_registration(target, state)
-    elif user.status == "pending":
+async def require_student(target: Message | CallbackQuery, db: Database) -> Student | None:
+    """Человек из группы, к которому привязан этот Telegram. Иначе — выбор себя из списка или статус заявки."""
+    chat_id = target.from_user.id
+    if student := await db.student_by_chat(chat_id):
+        return student
+    if request := await db.get_request(chat_id):
         await show(
             target,
-            "⏳ Твоя заявка на рассмотрении у старосты. Я напишу, когда её примут.\n\n"
-            f"ФИО: <b>{esc(user.name)}</b>. Ошибся — подай заявку заново.",
-            kb([btn("📝 Подать заявку заново", "reg:again")]),
-        )
-    elif user.status == "rejected":
-        await show(
-            target,
-            "❌ Заявка отклонена или тебя исключили из бота. Если это ошибка — напиши старосте "
-            "и подай заявку заново.",
-            kb([btn("📝 Подать заявку заново", "reg:again")]),
+            f"⏳ Заявка на рассмотрении у старосты: ты — <b>{esc(request.student.name)}</b>.\n"
+            "Я напишу, когда её примут. Выбрал не себя — выбери заново.",
+            kb([btn("📝 Выбрать заново", "reg")]),
         )
     else:
-        return user
+        await show_roster(target, db)
     return None
 
 
-# ================= регистрация =================
-async def start_registration(target: Message | CallbackQuery, state: FSMContext, ack: bool = True):
-    await state.clear()
-    await state.set_state(Reg.name)
+# ================= регистрация: выбор себя из списка =================
+async def show_roster(target: Message | CallbackQuery, db: Database, ack: bool = True):
+    free = await db.free_students()
+    admin_note = "\n\n<i>Ты админ: админка доступна по /admin и без выбора себя.</i>" if is_admin(target.from_user.id) else ""
+    if not free:
+        await show(
+            target,
+            "👋 Свободных имён в списке группы нет. Если тебя нет в списке или твоё имя заняли — "
+            f"напиши старосте.{admin_note}",
+            ack=ack,
+        )
+        return
+    buttons = [btn(s.name, f"rg:{s.id}") for s in free]
     await show(
         target,
-        "👋 <b>Регистрация</b>\n\nВведи <b>ФИО</b> полностью — так тебя увидят в очереди. "
-        "Заявку проверит староста.\n<i>Например: Иванов Иван Иванович</i>",
-        ack=ack,
+        f"👋 <b>Кто ты?</b>\n\nВыбери себя из списка группы. Заявку подтвердит староста.{admin_note}",
+        kb(*rows_of(buttons, 1), [btn("Меня нет в списке", "rg:none")]),
+        ack,
     )
 
 
-@router.callback_query(F.data == "reg:again")
-async def cb_reg_again(cb: CallbackQuery, state: FSMContext, db: Database):
-    user = await db.get_user(cb.from_user.id)
-    if user and user.approved:
-        await cb.answer("Ты уже зарегистрирован", show_alert=True)
-        await show(cb, "Что делаем?", await main_menu(db, cb.from_user.id, user), ack=False)
+@router.callback_query(F.data.in_({"reg", "reg:again"}))
+async def cb_roster(cb: CallbackQuery, db: Database):
+    if student := await db.student_by_chat(cb.from_user.id):
+        await show(cb, "Ты уже в боте. Выбери предмет:", await main_menu(db, cb.from_user.id, student))
         return
-    await start_registration(cb, state)
+    await show_roster(cb, db)
 
 
-@router.message(Reg.name, F.text, ~F.text.startswith("/"))
-async def reg_name(msg: Message, state: FSMContext, db: Database):
-    name, error = check_name(msg.text)
-    if error:
-        await msg.answer(error)
+@router.callback_query(F.data == "rg:none")
+async def cb_not_in_list(cb: CallbackQuery):
+    await show(
+        cb, "Напиши старосте или админу — тебя добавят в список, и потом выбери себя здесь.",
+        kb([btn("⬅️ К списку", "reg")]),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^rg:\d+$"))
+async def cb_pick(cb: CallbackQuery, db: Database):
+    student = await db.get_student(int(cb.data[3:]))
+    if not student or not student.active or student.linked:
+        await cb.answer("Это имя уже занято. Если это ты — напиши старосте.", show_alert=True)
+        await show_roster(cb, db, ack=False)
         return
-    await state.clear()
-    chat_id = msg.from_user.id
-    # Без админов принимать заявки некому — тогда регистрация открытая.
-    auto = is_admin(chat_id) or not config.ADMIN_IDS
-    user = await db.save_request(chat_id, msg.from_user.username, name, auto)
-    if auto:
-        await msg.answer(f"✅ Готово, <b>{esc(user.name)}</b>!\n\n{HELP}", reply_markup=await main_menu(db, chat_id, user))
+    await show(
+        cb, f"Ты — <b>{esc(student.name)}</b>?",
+        kb([btn("✅ Да, это я", f"rgok:{student.id}")], [btn("⬅️ Нет, к списку", "reg")]),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^rgok:\d+$"))
+async def cb_pick_confirm(cb: CallbackQuery, db: Database):
+    chat_id, student_id = cb.from_user.id, int(cb.data[5:])
+    student = await db.get_student(student_id)
+    if not student or not student.active or student.linked:
+        await cb.answer("Это имя уже занято. Если это ты — напиши старосте.", show_alert=True)
+        await show_roster(cb, db, ack=False)
         return
-    await notify_reviewers(msg.bot, db, user)
-    await msg.answer(
-        f"📨 Заявка отправлена: <b>{esc(user.name)}</b>.\n\nЕё проверит староста. Я напишу, когда заявку примут."
+    # Без админов принимать заявки некому — тогда сразу в бот.
+    if is_admin(chat_id) or not config.ADMIN_IDS:
+        student = await db.link(chat_id, cb.from_user.username, student_id)
+        await show(cb, f"✅ Готово, <b>{esc(student.name)}</b>!\n\n{HELP}", await main_menu(db, chat_id, student))
+        return
+    await db.create_request(chat_id, cb.from_user.username, student_id)
+    await notify_reviewers(cb.bot, db, await db.get_request(chat_id), cb.from_user.full_name)
+    await show(
+        cb, f"📨 Заявка отправлена: ты — <b>{esc(student.name)}</b>.\n\nСтароста подтвердит, и я напишу.",
+        kb([btn("📝 Выбрать заново", "reg")]),
     )
 
 
@@ -115,10 +131,10 @@ async def reg_name(msg: Message, state: FSMContext, db: Database):
 @router.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext, db: Database):
     await state.clear()
-    if user := await require_user(msg, state, db):
+    if student := await require_student(msg, db):
         await msg.answer(
-            f"👋 Привет, <b>{esc(user.name)}</b>! Выбери предмет:",
-            reply_markup=await main_menu(db, user.chat_id, user),
+            f"👋 Привет, <b>{esc(student.name)}</b>! Выбери предмет:",
+            reply_markup=await main_menu(db, msg.from_user.id, student),
         )
 
 
@@ -130,22 +146,22 @@ async def cmd_help(msg: Message):
 @router.message(Command("cancel"))
 async def cmd_cancel(msg: Message, state: FSMContext, db: Database):
     await state.clear()
-    if user := await require_user(msg, state, db):
-        await msg.answer("Отменено. Выбери предмет:", reply_markup=await main_menu(db, user.chat_id, user))
+    if student := await require_student(msg, db):
+        await msg.answer("Отменено. Выбери предмет:", reply_markup=await main_menu(db, msg.from_user.id, student))
 
 
 @router.message(Command("my"))
 async def cmd_my(msg: Message, state: FSMContext, db: Database):
     await state.clear()
-    if user := await require_user(msg, state, db):
-        await show_my(msg, db, user)
+    if student := await require_student(msg, db):
+        await show_my(msg, db, student)
 
 
 @router.callback_query(F.data == "menu")
 async def cb_menu(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
-    if user := await require_user(cb, state, db):
-        await show(cb, "Выбери предмет:", await main_menu(db, user.chat_id, user))
+    if student := await require_student(cb, db):
+        await show(cb, "Выбери предмет:", await main_menu(db, cb.from_user.id, student))
 
 
 @router.callback_query(F.data == "help")
@@ -157,25 +173,25 @@ async def cb_help(cb: CallbackQuery):
 @router.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
-    if not (user := await require_user(cb, state, db)):
+    if not (student := await require_student(cb, db)):
         return
-    role = "староста ⭐" if user.starosta else ("админ" if is_admin(user.chat_id) else "студент")
+    role = "админ" if is_admin(cb.from_user.id) else ("староста ⭐" if student.starosta else "студент")
     await show(
         cb,
-        f"👤 <b>Профиль</b>\n\nФИО: <b>{esc(user.name)}</b>\nРоль: {role}\n\n"
+        f"👤 <b>Профиль</b>\n\nФИО: <b>{esc(student.name)}</b>\nРоль: {role}\n\n"
         "<i>Чтобы исправить ФИО — напиши старосте или админу.</i>",
         kb([btn("ℹ️ Как это работает", "help")], [MENU_BTN]),
     )
 
 
 # ================= очередь по предмету =================
-async def show_queue(target: Message | CallbackQuery, db: Database, user: User, subject_id: int, ack: bool = True):
+async def show_queue(target: Message | CallbackQuery, db: Database, student: Student, subject_id: int, ack: bool = True):
     subject = await db.get_subject(subject_id)
     if subject is None:
-        await show(target, "Этого предмета больше нет.", await main_menu(db, user.chat_id, user), ack)
+        await show(target, "Этого предмета больше нет.", await main_menu(db, target.from_user.id, student), ack)
         return
     rows = await db.queue(subject.id)
-    me = next((r for r in rows if r.chat_id == user.chat_id), None)
+    me = next((r for r in rows if r.student_id == student.id), None)
     buttons = []
     if me and me.wants:
         buttons.append([btn("↩️ Передумал сдавать", f"sw:{subject.id}:0")])
@@ -190,49 +206,49 @@ async def show_queue(target: Message | CallbackQuery, db: Database, user: User, 
         if row:
             buttons.append(row)
     buttons.append([btn("🔄 Обновить", f"s:{subject.id}"), MENU_BTN])
-    await show(target, queue_text(subject, rows, me=user.chat_id), kb(*buttons), ack)
+    await show(target, queue_text(subject, rows, me=student.id), kb(*buttons), ack)
 
 
 @router.callback_query(F.data.regexp(r"^s:\d+$"))
 async def cb_subject(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
-    if user := await require_user(cb, state, db):
-        await show_queue(cb, db, user, int(cb.data[2:]))
+    if student := await require_student(cb, db):
+        await show_queue(cb, db, student, int(cb.data[2:]))
 
 
 @router.callback_query(F.data.regexp(r"^sw:\d+:[01]$"))
-async def cb_want(cb: CallbackQuery, state: FSMContext, db: Database):
-    if not (user := await require_user(cb, state, db)):
+async def cb_want(cb: CallbackQuery, db: Database):
+    if not (student := await require_student(cb, db)):
         return
     _, subject_id, want = cb.data.split(":")
     if await db.get_subject(int(subject_id)) is None:
         await cb.answer("Этого предмета больше нет", show_alert=True)
         return
-    await db.set_want(user.chat_id, int(subject_id), want == "1")
-    place = (await db.get_row(int(subject_id), user.chat_id))[0]
+    await db.set_want(student.id, int(subject_id), want == "1")
+    place = (await db.get_row(int(subject_id), student.id))[0]
     await cb.answer(f"Ты в очереди {place}-й" if want == "1" else "Отметка снята")
-    await show_queue(cb, db, user, int(subject_id), ack=False)
+    await show_queue(cb, db, student, int(subject_id), ack=False)
 
 
 @router.callback_query(F.data.regexp(r"^sd:\d+:-?1$"))
-async def cb_done(cb: CallbackQuery, state: FSMContext, db: Database):
-    if not (user := await require_user(cb, state, db)):
+async def cb_done(cb: CallbackQuery, db: Database):
+    if not (student := await require_student(cb, db)):
         return
     _, subject_id, delta = cb.data.split(":")
-    done = await db.change_done(user.chat_id, int(subject_id), int(delta))
+    done = await db.change_done(student.id, int(subject_id), int(delta))
     if done is None:
         await cb.answer("Менять некуда", show_alert=True)
     else:
         await cb.answer(f"Сдано: {done}" + (" 🎉" if int(delta) > 0 else ""))
-    await show_queue(cb, db, user, int(subject_id), ack=False)
+    await show_queue(cb, db, student, int(subject_id), ack=False)
 
 
 # ================= мои сданные =================
-async def show_my(target: Message | CallbackQuery, db: Database, user: User):
+async def show_my(target: Message | CallbackQuery, db: Database, student: Student):
     text = "📊 <b>Мои сданные</b>\n\n"
     buttons = []
     for s in await db.subjects():
-        place, row = await db.get_row(s.id, user.chat_id)
+        place, row = await db.get_row(s.id, student.id)
         want = f" · {WANT} хочу сдать" if row.wants else ""
         text += f"<b>{esc(s.name)}</b>: {row.done}/{s.total} · место {place}{want}\n"
         buttons.append(btn(f"📋 {s.name}", f"s:{s.id}"))
@@ -242,8 +258,8 @@ async def show_my(target: Message | CallbackQuery, db: Database, user: User):
 @router.callback_query(F.data == "my")
 async def cb_my(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
-    if user := await require_user(cb, state, db):
-        await show_my(cb, db, user)
+    if student := await require_student(cb, db):
+        await show_my(cb, db, student)
 
 
 # ================= запасные обработчики (регистрировать последними) =================
@@ -251,15 +267,14 @@ async def cb_my(cb: CallbackQuery, state: FSMContext, db: Database):
 async def stale_callback(cb: CallbackQuery, state: FSMContext, db: Database):
     """Кнопка из старого сообщения (например, после перезапуска бота)."""
     await state.clear()
-    user = await db.get_user(cb.from_user.id)
-    if user and user.approved:
+    if student := await db.student_by_chat(cb.from_user.id):
         await cb.answer("Эта кнопка устарела, открываю меню")
-        await show(cb, "Выбери предмет:", await main_menu(db, user.chat_id, user), ack=False)
+        await show(cb, "Выбери предмет:", await main_menu(db, cb.from_user.id, student), ack=False)
     else:
-        await require_user(cb, state, db)
+        await require_student(cb, db)
 
 
 @router.message()
-async def fallback_message(msg: Message, state: FSMContext, db: Database):
-    if user := await require_user(msg, state, db):
-        await msg.answer("Не понял сообщение. Выбери предмет 👇", reply_markup=await main_menu(db, user.chat_id, user))
+async def fallback_message(msg: Message, db: Database):
+    if student := await require_student(msg, db):
+        await msg.answer("Не понял сообщение. Выбери предмет 👇", reply_markup=await main_menu(db, msg.from_user.id, student))

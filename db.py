@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -10,16 +11,25 @@ from ranking import Row, order
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
--- Админы задаются в ADMIN_IDS, здесь только пользователи и старосты.
-CREATE TABLE IF NOT EXISTS users (
+-- Список группы. Аккаунт Telegram привязывается к человеку из списка после подтверждения.
+-- Админы задаются в ADMIN_IDS и могут не быть в списке.
+CREATE TABLE IF NOT EXISTS students (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name     TEXT NOT NULL UNIQUE,
+    active   INTEGER NOT NULL DEFAULT 1,   -- 0 — убран из группы (например, отчислен)
+    chat_id  INTEGER UNIQUE,               -- привязанный Telegram; NULL — ещё не в боте
+    username TEXT,
+    role     TEXT NOT NULL DEFAULT 'user'  -- user / starosta
+);
+
+-- Заявки «этот аккаунт Telegram — вот этот человек из списка».
+CREATE TABLE IF NOT EXISTS requests (
     chat_id    INTEGER PRIMARY KEY,
     username   TEXT,
-    name       TEXT NOT NULL,
-    role       TEXT NOT NULL DEFAULT 'user',     -- user / starosta
-    status     TEXT NOT NULL DEFAULT 'pending',  -- pending / approved / rejected
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -32,11 +42,11 @@ CREATE TABLE IF NOT EXISTS subjects (
 
 -- Сколько человек сдал по предмету и хочет ли сдать следующим.
 CREATE TABLE IF NOT EXISTS progress (
-    chat_id    INTEGER NOT NULL REFERENCES users(chat_id) ON DELETE CASCADE,
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     done       INTEGER NOT NULL DEFAULT 0,
     want_since TEXT,                        -- ISO-время «хочу сдать следующим», NULL — не хочет
-    PRIMARY KEY (chat_id, subject_id)
+    PRIMARY KEY (student_id, subject_id)
 );
 
 -- Журнал действий старост и админов.
@@ -49,25 +59,33 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 """
 
-# Таблицы прошлых версий (с расписанием и датами). Ботом тогда никто не пользовался — пересоздаём.
-OLD_TABLES = ("payments", "queue", "lessons", "works", "audit", "progress", "subjects", "users")
+# Таблицы прошлых версий. Ботом тогда никто не пользовался — пересоздаём.
+OLD_TABLES = ("payments", "queue", "lessons", "works", "users", "audit", "progress", "requests", "subjects", "students")
 
 
 @dataclass
-class User:
-    chat_id: int
-    username: str | None
+class Student:
+    id: int
     name: str
+    active: bool
+    chat_id: int | None
+    username: str | None
     role: str
-    status: str
 
     @property
-    def approved(self) -> bool:
-        return self.status == "approved"
+    def linked(self) -> bool:
+        return self.chat_id is not None
 
     @property
     def starosta(self) -> bool:
-        return self.approved and self.role == "starosta"
+        return self.active and self.linked and self.role == "starosta"
+
+
+@dataclass
+class Request:
+    chat_id: int
+    username: str | None
+    student: Student
 
 
 @dataclass
@@ -84,8 +102,8 @@ class AuditRecord:
     text: str
 
 
-def _user(row) -> User:
-    return User(row["chat_id"], row["username"], row["name"], row["role"], row["status"])
+def _student(row) -> Student:
+    return Student(row["id"], row["name"], bool(row["active"]), row["chat_id"], row["username"], row["role"])
 
 
 def _subject(row) -> Subject:
@@ -94,6 +112,19 @@ def _subject(row) -> Subject:
 
 def local_now() -> datetime:
     return datetime.now(config.TIMEZONE).replace(tzinfo=None)
+
+
+def parse_roster(text: str) -> list[str]:
+    """ФИО из вставленного списка: номера, заголовок и пустые строки пропускаются, отчисленные — тоже."""
+    names = []
+    for line in text.splitlines():
+        if line.strip().startswith("№"):
+            continue  # заголовок таблицы «№ Фамилия Имя Отчество»
+        line = re.sub(r"^\s*\d+[.)]?\s*", "", line).strip()
+        if not line or "отчисл" in line.lower() or line.lower() == "фамилия имя отчество":
+            continue
+        names.append(" ".join(line.split()))
+    return names
 
 
 class Database:
@@ -108,8 +139,8 @@ class Database:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.execute("PRAGMA journal_mode=WAL")
-        await self.conn.execute("PRAGMA foreign_keys=ON")
         await self._drop_old_schema()
+        await self.conn.execute("PRAGMA foreign_keys=ON")
         await self.conn.executescript(SCHEMA)
         await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -120,10 +151,8 @@ class Database:
         tables = {r["name"] for r in await self._all("SELECT name FROM sqlite_master WHERE type = 'table'")}
         if version < SCHEMA_VERSION and tables & set(OLD_TABLES):
             log.warning("Найдена база старой версии — пересоздаю таблицы")
-            await self.conn.execute("PRAGMA foreign_keys=OFF")
             for t in OLD_TABLES:
                 await self.conn.execute(f"DROP TABLE IF EXISTS {t}")
-            await self.conn.execute("PRAGMA foreign_keys=ON")
             await self.conn.commit()
 
     async def _seed_subjects(self) -> None:
@@ -151,58 +180,115 @@ class Database:
         await self.conn.commit()
         return cur.rowcount
 
-    # --- пользователи и заявки ---
-    async def get_user(self, chat_id: int) -> User | None:
-        row = await self._one("SELECT * FROM users WHERE chat_id = ?", (chat_id,))
-        return _user(row) if row else None
+    # --- список группы ---
+    async def students(self, active: bool = True) -> list[Student]:
+        rows = await self._all("SELECT * FROM students WHERE active = ?", (int(active),))
+        return sorted((_student(r) for r in rows), key=lambda s: s.name.casefold())
 
-    async def save_request(self, chat_id: int, username: str | None, name: str, approved: bool) -> User:
-        """Новая заявка (или повторная после отклонения). Роль сбрасывается."""
+    async def get_student(self, student_id: int) -> Student | None:
+        row = await self._one("SELECT * FROM students WHERE id = ?", (student_id,))
+        return _student(row) if row else None
+
+    async def student_by_chat(self, chat_id: int) -> Student | None:
+        """Человек из группы, к которому привязан этот Telegram."""
+        row = await self._one("SELECT * FROM students WHERE chat_id = ? AND active = 1", (chat_id,))
+        return _student(row) if row else None
+
+    async def free_students(self) -> list[Student]:
+        """Кого ещё можно выбрать при регистрации."""
+        return [s for s in await self.students() if not s.linked]
+
+    async def add_students(self, names: list[str]) -> tuple[list[str], list[str]]:
+        """Добавляет в список (отчисленного с таким ФИО возвращает). Возвращает (добавлены, уже были)."""
+        added, existing = [], []
+        for name in names:
+            row = await self._one("SELECT * FROM students WHERE name = ?", (name,))
+            if row and row["active"]:
+                existing.append(name)
+            elif row:
+                await self.conn.execute("UPDATE students SET active = 1 WHERE id = ?", (row["id"],))
+                added.append(name)
+            else:
+                await self.conn.execute("INSERT INTO students (name) VALUES (?)", (name,))
+                added.append(name)
+        await self.conn.commit()
+        return added, existing
+
+    async def rename_student(self, student_id: int, name: str) -> bool:
+        if await self._one("SELECT 1 FROM students WHERE name = ? AND id != ?", (name, student_id)):
+            return False
+        await self._write("UPDATE students SET name = ? WHERE id = ?", (name, student_id))
+        return True
+
+    async def set_active(self, student_id: int, active: bool) -> None:
+        """Убрать из группы / вернуть. Сданные сохраняются, отметки «хочу сдать» снимаются."""
+        await self._write("UPDATE students SET active = ? WHERE id = ?", (int(active), student_id))
+        await self._write("UPDATE progress SET want_since = NULL WHERE student_id = ?", (student_id,))
+
+    async def unlink(self, student_id: int) -> int | None:
+        """Отвязывает Telegram от человека (например, если выбрал не себя). Возвращает отвязанный chat_id."""
+        student = await self.get_student(student_id)
+        if not student or not student.linked:
+            return None
         await self._write(
-            "INSERT INTO users (chat_id, username, name, status) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET username = excluded.username, name = excluded.name, "
-            "status = excluded.status, role = 'user'",
-            (chat_id, username, name, "approved" if approved else "pending"),
+            "UPDATE students SET chat_id = NULL, username = NULL, role = 'user' WHERE id = ?", (student_id,)
         )
-        return await self.get_user(chat_id)
+        return student.chat_id
 
-    async def review(self, chat_id: int, approve: bool) -> User | None:
-        """Принимает или отклоняет заявку. None — заявку уже рассмотрели."""
-        changed = await self._write(
-            "UPDATE users SET status = ? WHERE chat_id = ? AND status = 'pending'",
-            ("approved" if approve else "rejected", chat_id),
-        )
-        return await self.get_user(chat_id) if changed else None
-
-    async def pending_requests(self) -> list[User]:
-        rows = await self._all("SELECT * FROM users WHERE status = 'pending' ORDER BY created_at")
-        return [_user(r) for r in rows]
-
-    async def members(self) -> list[User]:
-        """Все с принятой заявкой, по алфавиту."""
-        rows = await self._all("SELECT * FROM users WHERE status = 'approved'")
-        return sorted((_user(r) for r in rows), key=lambda u: u.name.casefold())
-
-    async def name_taken(self, name: str, except_chat_id: int) -> bool:
-        # lower() в SQLite не понимает кириллицу, поэтому сравниваем в Python.
-        return any(
-            u.name.casefold() == name.casefold() and u.chat_id != except_chat_id for u in await self.members()
-        )
+    async def set_role(self, student_id: int, role: str) -> None:
+        assert role in ("user", "starosta")
+        await self._write("UPDATE students SET role = ? WHERE id = ?", (role, student_id))
 
     async def starostas(self) -> list[int]:
-        return [u.chat_id for u in await self.members() if u.starosta]
+        return [s.chat_id for s in await self.students() if s.starosta]
 
-    async def set_name(self, chat_id: int, name: str) -> None:
-        await self._write("UPDATE users SET name = ? WHERE chat_id = ?", (name, chat_id))
+    async def member_chats(self) -> list[int]:
+        """Telegram всех из группы, кто есть в боте."""
+        return [s.chat_id for s in await self.students() if s.linked]
 
-    async def set_role(self, chat_id: int, role: str) -> None:
-        assert role in ("user", "starosta")
-        await self._write("UPDATE users SET role = ? WHERE chat_id = ?", (role, chat_id))
+    # --- заявки ---
+    async def create_request(self, chat_id: int, username: str | None, student_id: int) -> None:
+        await self._write(
+            "INSERT INTO requests (chat_id, username, student_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET username = excluded.username, student_id = excluded.student_id, "
+            "created_at = CURRENT_TIMESTAMP",
+            (chat_id, username, student_id),
+        )
 
-    async def exclude(self, chat_id: int) -> None:
-        """Исключает из бота: заявка отклонена, отметки «хочу сдать» снимаются (счётчики остаются)."""
-        await self._write("UPDATE users SET status = 'rejected', role = 'user' WHERE chat_id = ?", (chat_id,))
-        await self._write("UPDATE progress SET want_since = NULL WHERE chat_id = ?", (chat_id,))
+    def _request(self, row, student: Student) -> Request:
+        return Request(row["chat_id"], row["username"], student)
+
+    async def get_request(self, chat_id: int) -> Request | None:
+        row = await self._one("SELECT * FROM requests WHERE chat_id = ?", (chat_id,))
+        return self._request(row, await self.get_student(row["student_id"])) if row else None
+
+    async def pending_requests(self) -> list[Request]:
+        rows = await self._all("SELECT * FROM requests ORDER BY created_at")
+        return [self._request(r, await self.get_student(r["student_id"])) for r in rows]
+
+    async def link(self, chat_id: int, username: str | None, student_id: int) -> Student | None:
+        """Привязывает Telegram к человеку из списка, если тот свободен. Заявка этого аккаунта удаляется."""
+        await self._write("DELETE FROM requests WHERE chat_id = ?", (chat_id,))
+        target = await self.get_student(student_id)
+        if not target or not target.active or target.linked:
+            return None
+        await self.conn.execute("UPDATE students SET chat_id = NULL, role = 'user' WHERE chat_id = ?", (chat_id,))
+        await self._write("UPDATE students SET chat_id = ?, username = ? WHERE id = ?", (chat_id, username, student_id))
+        return await self.get_student(student_id)
+
+    async def approve(self, chat_id: int) -> Student | str:
+        """Принимает заявку. Строка — почему не получилось."""
+        request = await self.get_request(chat_id)
+        if request is None:
+            return "Эту заявку уже рассмотрели"
+        student = await self.link(chat_id, request.username, request.student.id)
+        return student or "Это ФИО уже занято другим аккаунтом — заявка удалена"
+
+    async def reject(self, chat_id: int) -> Request | None:
+        request = await self.get_request(chat_id)
+        if request:
+            await self._write("DELETE FROM requests WHERE chat_id = ?", (chat_id,))
+        return request
 
     # --- предметы ---
     async def subjects(self) -> list[Subject]:
@@ -237,56 +323,56 @@ class Database:
     async def queue(self, subject_id: int) -> list[Row]:
         """Вся группа по предмету в порядке очереди (ranking.order)."""
         rows = await self._all(
-            "SELECT u.chat_id, u.name, COALESCE(p.done, 0) AS done, p.want_since FROM users u "
-            "LEFT JOIN progress p ON p.chat_id = u.chat_id AND p.subject_id = ? WHERE u.status = 'approved'",
+            "SELECT s.id, s.name, COALESCE(p.done, 0) AS done, p.want_since FROM students s "
+            "LEFT JOIN progress p ON p.student_id = s.id AND p.subject_id = ? WHERE s.active = 1",
             (subject_id,),
         )
         return order([
-            Row(r["chat_id"], r["name"], r["done"], datetime.fromisoformat(r["want_since"]) if r["want_since"] else None)
+            Row(r["id"], r["name"], r["done"], datetime.fromisoformat(r["want_since"]) if r["want_since"] else None)
             for r in rows
         ])
 
-    async def get_row(self, subject_id: int, chat_id: int) -> tuple[int, Row] | None:
+    async def get_row(self, subject_id: int, student_id: int) -> tuple[int, Row] | None:
         """(место, строка) человека в очереди по предмету."""
         for place, row in enumerate(await self.queue(subject_id), 1):
-            if row.chat_id == chat_id:
+            if row.student_id == student_id:
                 return place, row
         return None
 
-    async def _ensure_progress(self, chat_id: int, subject_id: int) -> None:
+    async def _ensure_progress(self, student_id: int, subject_id: int) -> None:
         await self.conn.execute(
-            "INSERT OR IGNORE INTO progress (chat_id, subject_id) VALUES (?, ?)", (chat_id, subject_id)
+            "INSERT OR IGNORE INTO progress (student_id, subject_id) VALUES (?, ?)", (student_id, subject_id)
         )
 
-    async def set_want(self, chat_id: int, subject_id: int, want: bool) -> None:
-        await self._ensure_progress(chat_id, subject_id)
+    async def set_want(self, student_id: int, subject_id: int, want: bool) -> None:
+        await self._ensure_progress(student_id, subject_id)
         if want:
             # Повторное нажатие не двигает время — место среди желающих сохраняется.
             await self._write(
-                "UPDATE progress SET want_since = COALESCE(want_since, ?) WHERE chat_id = ? AND subject_id = ?",
-                (local_now().isoformat(timespec="microseconds"), chat_id, subject_id),
+                "UPDATE progress SET want_since = COALESCE(want_since, ?) WHERE student_id = ? AND subject_id = ?",
+                (local_now().isoformat(timespec="microseconds"), student_id, subject_id),
             )
         else:
             await self._write(
-                "UPDATE progress SET want_since = NULL WHERE chat_id = ? AND subject_id = ?", (chat_id, subject_id)
+                "UPDATE progress SET want_since = NULL WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
             )
 
-    async def change_done(self, chat_id: int, subject_id: int, delta: int) -> int | None:
+    async def change_done(self, student_id: int, subject_id: int, delta: int) -> int | None:
         """Меняет число сданных на delta (в пределах 0..всего работ). «Сдал» (+1) снимает отметку
         «хочу сдать». Возвращает новое число или None, если менять некуда."""
         subject = await self.get_subject(subject_id)
         if subject is None:
             return None
-        await self._ensure_progress(chat_id, subject_id)
+        await self._ensure_progress(student_id, subject_id)
         changed = await self._write(
             "UPDATE progress SET done = done + ?, want_since = CASE WHEN ? > 0 THEN NULL ELSE want_since END "
-            "WHERE chat_id = ? AND subject_id = ? AND done + ? BETWEEN 0 AND ?",
-            (delta, delta, chat_id, subject_id, delta, subject.total),
+            "WHERE student_id = ? AND subject_id = ? AND done + ? BETWEEN 0 AND ?",
+            (delta, delta, student_id, subject_id, delta, subject.total),
         )
         if not changed:
             return None
         return (await self._one(
-            "SELECT done FROM progress WHERE chat_id = ? AND subject_id = ?", (chat_id, subject_id)
+            "SELECT done FROM progress WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
         ))["done"]
 
     # --- журнал ---
