@@ -270,12 +270,14 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
         tg = "ещё не зашёл в бота"
     role = "староста ⭐" if s.starosta else "студент"
     text = f"👤 <b>{esc(s.name)}</b>\n{tg}\nРоль: {role}" + ("" if s.active else "\n🗂 <b>убран из группы</b>")
-    text += "\n\n<b>Сдано:</b>\n"
-    for subj in await db.subjects():
-        found = await db.get_row(subj.id, s.id)
-        if found:
-            text += f"• {esc(subj.name)}: {found[1].done}/{subj.total}{f' · {WANT}' if found[1].wants else ''}\n"
-    rows = [[btn("✏️ Исправить ФИО", f"aun:{s.id}")]]
+    progress = []
+    if s.active:
+        text += "\n\n<b>Сдано</b> — нажми на предмет, чтобы поправить:"
+        for subj in await db.subjects():
+            _, row = await db.get_row(subj.id, s.id)
+            progress.append(btn(f"{subj.name}: {row.done}/{subj.total}{f' {WANT}' if row.wants else ''}",
+                                f"aqe:{subj.id}:{s.id}:p"))
+    rows = [*rows_of(progress), [btn("✏️ Исправить ФИО", f"aun:{s.id}")]]
     if staff.admin:
         if s.active and s.linked:
             rows.append([btn("Снять старосту" if s.starosta else "⭐ Сделать старостой", f"aur:{s.id}")])
@@ -430,7 +432,10 @@ async def cb_subject_queue(cb: CallbackQuery, db: Database):
         await show_subject_queue(cb, db, int(cb.data[4:]))
 
 
-async def show_progress_card(cb: CallbackQuery, db: Database, subject_id: int, student_id: int, ack: bool = True):
+async def show_progress_card(
+    cb: CallbackQuery, db: Database, subject_id: int, student_id: int, ack: bool = True, from_person: bool = False
+):
+    """Правка сданных одного человека. from_person — открыта из карточки человека (туда и «назад»)."""
     subject = await db.get_subject(subject_id)
     found = subject and await db.get_row(subject_id, student_id)
     if not found:
@@ -438,10 +443,12 @@ async def show_progress_card(cb: CallbackQuery, db: Database, subject_id: int, s
         return
     place, row = found
     want = f"\n{WANT} хочет сдать следующим" if row.wants else ""
+    p = ":p" if from_person else ""
+    back = btn("⬅️ К человеку", f"au:{student_id}") if from_person else btn("⬅️ К очереди", f"aqs:{subject_id}")
     rows = [
-        [btn("➖ 1", f"aqd:{subject_id}:{student_id}:-1"), btn("➕ 1", f"aqd:{subject_id}:{student_id}:1")],
-        [btn(f"Снять {WANT}" if row.wants else f"Поставить {WANT}", f"aqw:{subject_id}:{student_id}")],
-        [btn("⬅️ К очереди", f"aqs:{subject_id}"), ADMIN_BTN],
+        [btn("➖ 1", f"aqd:{subject_id}:{student_id}:-1{p}"), btn("➕ 1", f"aqd:{subject_id}:{student_id}:1{p}")],
+        [btn(f"Снять {WANT}" if row.wants else f"Поставить {WANT}", f"aqw:{subject_id}:{student_id}{p}")],
+        [back, ADMIN_BTN],
     ]
     await show(
         cb, f"<b>{esc(subject.name)}</b>\n\n{esc(row.name)}: сдано <b>{row.done}/{subject.total}</b>, место {place}{want}",
@@ -449,18 +456,18 @@ async def show_progress_card(cb: CallbackQuery, db: Database, subject_id: int, s
     )
 
 
-@router.callback_query(F.data.regexp(r"^aqe:\d+:\d+$"))
+@router.callback_query(F.data.regexp(r"^aqe:\d+:\d+(:p)?$"))
 async def cb_progress_card(cb: CallbackQuery, db: Database):
     if await need_staff(cb, db):
-        _, subject_id, student_id = cb.data.split(":")
-        await show_progress_card(cb, db, int(subject_id), int(student_id))
+        _, subject_id, student_id, *p = cb.data.split(":")
+        await show_progress_card(cb, db, int(subject_id), int(student_id), from_person=bool(p))
 
 
-@router.callback_query(F.data.regexp(r"^aqd:\d+:\d+:-?1$"))
+@router.callback_query(F.data.regexp(r"^aqd:\d+:\d+:-?1(:p)?$"))
 async def cb_progress_change(cb: CallbackQuery, db: Database):
     if not (staff := await need_staff(cb, db)):
         return
-    _, subject_id, student_id, delta = cb.data.split(":")
+    _, subject_id, student_id, delta, *p = cb.data.split(":")
     subject, s = await db.get_subject(int(subject_id)), await db.get_student(int(student_id))
     done = await db.change_done(s.id, subject.id, int(delta)) if subject and s else None
     if done is None:
@@ -473,14 +480,14 @@ async def cb_progress_change(cb: CallbackQuery, db: Database):
         kb([btn("📋 Очередь", f"s:{subject.id}")]),
     )
     await cb.answer(f"Теперь {done}")
-    await show_progress_card(cb, db, subject.id, s.id, ack=False)
+    await show_progress_card(cb, db, subject.id, s.id, ack=False, from_person=bool(p))
 
 
-@router.callback_query(F.data.regexp(r"^aqw:\d+:\d+$"))
+@router.callback_query(F.data.regexp(r"^aqw:\d+:\d+(:p)?$"))
 async def cb_progress_want(cb: CallbackQuery, db: Database):
     if not (staff := await need_staff(cb, db)):
         return
-    _, subject_id, student_id = cb.data.split(":")
+    _, subject_id, student_id, *p = cb.data.split(":")
     subject, s = await db.get_subject(int(subject_id)), await db.get_student(int(student_id))
     found = subject and s and await db.get_row(subject.id, s.id)
     if not found:
@@ -492,7 +499,7 @@ async def cb_progress_want(cb: CallbackQuery, db: Database):
     await journal_add(db, staff, f"{verb} отметка {WANT}: {s.name} · {subject.name}")
     await notify(cb.bot, s, f"{WANT} Отметка «хочу сдать» по <b>{esc(subject.name)}</b> {verb} ({esc(staff.signature)}).")
     await cb.answer(verb.capitalize())
-    await show_progress_card(cb, db, subject.id, s.id, ack=False)
+    await show_progress_card(cb, db, subject.id, s.id, ack=False, from_person=bool(p))
 
 
 # ================= рассылка =================
