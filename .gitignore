@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+queue_data.json
+.DS_Store
+.ssh/
+backups/

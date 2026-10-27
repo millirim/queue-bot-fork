@@ -1,0 +1,10 @@
+[Unit]
+Description=Ежедневный бэкап базы бота электронной очереди
+
+[Timer]
+OnCalendar=*-*-* 04:00
+# Если сервер был выключен в 4 утра — сделать бэкап при включении.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
