@@ -1,60 +1,36 @@
-import random
+from datetime import datetime, timedelta
 
-from ranking import LOT, NORMAL, UNSURE, URGENT, Candidate, rank
+from ranking import Row, order
 
-
-def order(cands, seed=0):
-    return [c.id for c, _ in rank(cands, random.Random(seed))]
+T = datetime(2026, 10, 27, 10, 0)
 
 
-def reasons(cands, seed=0):
-    return {c.id: r for c, r in rank(cands, random.Random(seed))}
+def names(rows):
+    return [r.name for r in order(rows)]
 
 
-def test_lower_number_goes_first():
-    cands = [Candidate(1, 5, URGENT, None), Candidate(2, 2, UNSURE, None), Candidate(3, 3, NORMAL, None)]
-    assert order(cands) == [2, 3, 1]
-
-
-def test_mood_decides_on_equal_number():
-    cands = [Candidate(1, 4, UNSURE, None), Candidate(2, 4, URGENT, None), Candidate(3, 4, NORMAL, None)]
-    assert order(cands) == [2, 3, 1]
-    assert set(reasons(cands).values()) == {""}  # номер и настрой и так видны
-
-
-def test_last_time_decides_when_number_and_mood_equal():
-    cands = [
-        Candidate(1, 4, NORMAL, (1, 10)),   # в прошлый раз был первым
-        Candidate(2, 4, NORMAL, (10, 10)),  # был последним
-        Candidate(3, 4, NORMAL, None),      # не был — середина
+def test_wanting_go_first_then_by_done():
+    rows = [
+        Row(1, "Орлов", 0, None),
+        Row(2, "Петров", 3, T),
+        Row(3, "Сидоров", 1, T + timedelta(minutes=5)),
+        Row(4, "Зайцев", 2, None),
     ]
-    assert order(cands) == [2, 3, 1]
-    r = reasons(cands)
-    assert r[2] == "в прошлый раз — 10 место из 10"
-    assert r[3] == "в прошлый раз — не в очереди"
+    # Хотят сдать: Сидоров (1 сдано) раньше Петрова (3). Остальные — по сданным.
+    assert names(rows) == ["Сидоров", "Петров", "Орлов", "Зайцев"]
 
 
-def test_lot_only_on_full_tie():
-    cands = [Candidate(1, 6, NORMAL, None), Candidate(2, 6, NORMAL, None), Candidate(3, 2, NORMAL, None)]
-    seen = set()
-    for seed in range(50):
-        o = order(cands, seed)
-        assert o[0] == 3
-        seen.add(tuple(o))
-        r = reasons(cands, seed)
-        assert r[1] == r[2] == LOT and r[3] == ""
-    assert seen == {(3, 1, 2), (3, 2, 1)}  # жребий реально случайный
+def test_wanting_with_equal_done_by_time():
+    rows = [Row(1, "Позже", 2, T + timedelta(minutes=1)), Row(2, "Раньше", 2, T)]
+    assert names(rows) == ["Раньше", "Позже"]
 
 
-def test_alone_last_time_counts_as_middle():
-    cands = [Candidate(1, 1, NORMAL, (1, 1)), Candidate(2, 1, NORMAL, None)]
-    assert set(reasons(cands).values()) == {LOT}
+def test_rest_with_equal_done_alphabetically():
+    rows = [Row(1, "Яковлев", 1, None), Row(2, "антонов", 1, None), Row(3, "Борисов", 0, None)]
+    assert names(rows) == ["Борисов", "антонов", "Яковлев"]
 
 
-def test_result_is_permutation():
-    rnd = random.Random(1)
-    cands = [Candidate(i, rnd.randint(1, 5), rnd.choice([URGENT, NORMAL, UNSURE]), None) for i in range(30)]
-    result = rank(cands, rnd)
-    assert sorted(c.id for c, _ in result) == list(range(30))
-    keys = [c.key() for c, _ in result]
-    assert keys == sorted(keys)
+def test_order_is_stable_and_complete():
+    rows = [Row(i, f"Человек{i}", i % 3, T if i % 2 else None) for i in range(20)]
+    assert sorted(r.chat_id for r in order(rows)) == list(range(20))
+    assert order(rows) == order(list(reversed(rows)))

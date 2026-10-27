@@ -1,46 +1,18 @@
-"""Общее для хендлеров, админки и планировщика: правила времени, права, отправка и форматирование."""
+"""Общее для хендлеров и админки: права, отправка и форматирование."""
 import asyncio
 import html
 import logging
 import re
-from datetime import datetime, timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import config
-from db import Database, Entry, Lesson, User
-from ranking import MOOD_ICON
-from schedule import WEEKDAY_SHORT, ScheduleStore, is_queue_lesson, work_count
+from db import Subject, User
+from ranking import WANT, Row
 
 log = logging.getLogger(__name__)
-
-
-def now() -> datetime:
-    """Текущее местное время без tzinfo (так хранятся занятия)."""
-    return datetime.now(config.TIMEZONE).replace(tzinfo=None)
-
-
-def unlock_at(l: Lesson) -> datetime:
-    return l.starts_at - timedelta(hours=config.UNLOCK_BEFORE_HOURS)
-
-
-def warn_at(l: Lesson) -> datetime:
-    return unlock_at(l) - timedelta(minutes=config.UNLOCK_WARN_MINUTES)
-
-
-def shuffle_at(l: Lesson) -> datetime:
-    return l.starts_at - timedelta(minutes=config.SHUFFLE_BEFORE_MINUTES)
-
-
-def is_open(l: Lesson, t: datetime | None = None) -> bool:
-    t = t or now()
-    return unlock_at(l) <= t < l.ends_at
-
-
-def user_fits(u: User, l: Lesson) -> bool:
-    return u.group_no == l.group_no and (l.subgroup == 0 or u.subgroup in (0, l.subgroup))
 
 
 # --- права ---
@@ -53,11 +25,6 @@ def is_staff(chat_id: int, user: User | None) -> bool:
     return is_admin(chat_id) or bool(user and user.starosta)
 
 
-def can_manage(chat_id: int, user: User | None, group_no: str) -> bool:
-    """Админ управляет любой группой, староста — только своей."""
-    return is_admin(chat_id) or bool(user and user.starosta and user.group_no == group_no)
-
-
 def check_name(text: str) -> tuple[str, str | None]:
     """Нормализованное ФИО и текст ошибки (None — всё в порядке)."""
     name = " ".join(text.split())
@@ -66,30 +33,6 @@ def check_name(text: str) -> tuple[str, str | None]:
     if len(name) > 80:
         return name, "⚠️ Слишком длинно, максимум 80 символов."
     return name, None
-
-
-# --- занятия ---
-async def upcoming_lessons(
-    db: Database, store: ScheduleStore, group_no: str, subgroup: int | None
-) -> list[Lesson]:
-    """Ближайшее (ещё не закончившееся) занятие по каждому предмету и типу, на котором что-то сдают.
-    subgroup — подгруппа студента; None — все подгруппы (для старост и админов)."""
-    schedule = await store.get(group_no)
-    if schedule is None:
-        return []
-    t = now()
-    result, seen = [], set()
-    for o in schedule.occurrences(t.date(), t.date() + timedelta(days=config.LOOKAHEAD_DAYS)):
-        if o.ends_at <= t or not is_queue_lesson(o):
-            continue
-        if subgroup is not None and o.subgroup and subgroup and o.subgroup != subgroup:
-            continue
-        key = (o.subject, o.ltype) if subgroup is not None else (o.subject, o.ltype, o.subgroup)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(await db.get_lesson(await db.upsert_lesson(o)))
-    return result
 
 
 # --- отправка ---
@@ -149,15 +92,17 @@ def btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
-def day_time(d: datetime) -> str:
-    return f"{WEEKDAY_SHORT[d.weekday()]} {d:%d.%m} {d:%H:%M}"
+def rows_of(buttons: list, size: int = 2) -> list[list]:
+    return [buttons[i:i + size] for i in range(0, len(buttons), size)]
 
 
-def when(d: datetime) -> str:
-    """«сегодня в 10:05» / «завтра в 10:05» / «22.10 в 10:05»."""
-    delta = (d.date() - now().date()).days
-    day = {0: "сегодня", 1: "завтра"}.get(delta, f"{d:%d.%m}")
-    return f"{day} в {d:%H:%M}"
+def works(n: int) -> str:
+    """«1 работа», «3 работы», «5 работ»."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} работа"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} работы"
+    return f"{n} работ"
 
 
 def short_name(name: str) -> str:
@@ -166,57 +111,19 @@ def short_name(name: str) -> str:
     return surname + (" " + "".join(f"{p[0]}." for p in rest) if rest else "")
 
 
-def lesson_short(l: Lesson) -> str:
-    sub = f" · {l.subgroup} подгр." if l.subgroup else ""
-    return f"{l.subject} ({l.ltype}) · {day_time(l.starts_at)}{sub}"
-
-
-def lesson_header(l: Lesson) -> str:
-    parts = [f"{WEEKDAY_SHORT[l.starts_at.weekday()]} {l.starts_at:%d.%m}, "
-             f"{l.starts_at:%H:%M}–{l.ends_at:%H:%M}"]
-    if l.room:
-        parts.append(esc(l.room))
-    if l.subgroup:
-        parts.append(f"{l.subgroup} подгруппа")
-    return f"📋 <b>{esc(l.subject)} ({esc(l.ltype)})</b>\n📅 " + " · ".join(parts)
-
-
-def entry_work(e: Entry, subject: str) -> str:
-    title = config.KIND_TITLES.get(e.kind, e.kind)
-    single = work_count(subject, e.kind) == 1
-    return title if single else f"{title} №{e.number}"
-
-
-def status_line(l: Lesson) -> str:
-    t = now()
-    if t < unlock_at(l):
-        return f"🔒 Запись откроется {when(unlock_at(l))}."
-    if l.shuffled:
-        return "🎲 Очередь сформирована. Кто записался позже — встаёт в конец."
-    if t >= l.ends_at:
-        return "Занятие закончилось."
-    return (
-        f"🔓 Запись открыта.\n🎲 Жеребьёвка {when(shuffle_at(l))}. Пока порядок предварительный: "
-        "по номеру работы и настрою (правила — в /help)."
-    )
-
-
-def entry_line(l: Lesson, e: Entry, num: str, me: int | None = None) -> str:
-    notes = [n for n in (
-        "" if e.late else e.reason,
-        "после жеребьёвки" if e.late else "",
-        "✋ передвинут старостой" if e.moved else "",
-    ) if n]
-    mark = " 👈 <i>это ты</i>" if me is not None and e.chat_id == me else ""
-    extra = f" · <i>{' · '.join(notes)}</i>" if notes else ""
-    return f"{num} <b>{esc(e.name)}</b> — {entry_work(e, l.subject)} {MOOD_ICON.get(e.mood, '')}{extra}{mark}"
-
-
-def queue_text(l: Lesson, entries: list[Entry], me: int | None = None) -> str:
-    text = f"{lesson_header(l)}\n{status_line(l)}\n\n"
-    if not entries:
-        return text + "⚠️ Пока никто не записан."
-    text += f"Записано: {len(entries)}\n"
-    for i, e in enumerate(entries, 1):
-        text += entry_line(l, e, f"{i}." if l.shuffled else "•", me) + "\n"
+def queue_text(subject: Subject, rows: list[Row], me: int | None = None) -> str:
+    """Живая очередь: сверху желающие сдать, ниже остальные."""
+    text = f"📋 <b>{esc(subject.name)}</b> — очередь сейчас\n"
+    if not rows:
+        return text + "\nВ группе пока никого нет."
+    wanting = sum(r.wants for r in rows)
+    for i, r in enumerate(rows, 1):
+        if i == 1 and wanting:
+            text += f"\n{WANT} <b>Хотят сдать следующими:</b>\n"
+        if i == wanting + 1:
+            text += "\n<b>Остальные</b> (меньше сдано — выше):\n" if wanting else "\n"
+        mark = " 👈 <i>это ты</i>" if r.chat_id == me else ""
+        text += f"{i}. {esc(r.name)} — {r.done}/{subject.total}{mark}\n"
+    if not wanting:
+        text += f"\n<i>Пока никто не нажал «{WANT} Хочу сдать следующим».</i>"
     return text

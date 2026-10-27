@@ -22,8 +22,6 @@ python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "Нужен
 
 say "Проверяю доступ в интернет"
 curl -sS -m 15 -o /dev/null https://api.telegram.org || die "Нет доступа к api.telegram.org — бот не сможет работать"
-curl -sS -m 15 -o /dev/null https://iis.bsuir.by \
-    || echo "⚠️  Нет доступа к iis.bsuir.by — расписание будет браться из сохранённой копии/xlsx"
 
 say "Создаю пользователя $APP_USER (без root-прав и без входа в систему)"
 id -u "$APP_USER" &>/dev/null \
