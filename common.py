@@ -38,14 +38,19 @@ def is_staff(chat_id: int, student: Student | None) -> bool:
 # --- команды в меню Telegram: каждый видит свои ---
 BASE_COMMANDS = [
     BotCommand(command="start", description="Главное меню"),
-    BotCommand(command="my", description="Мои сданные"),
+    BotCommand(command="my", description="Моё: сданные и место в очереди"),
     BotCommand(command="cancel", description="Отменить действие"),
     BotCommand(command="help", description="Как работает очередь"),
 ]
 STAFF_COMMANDS = {
     "moderator": BotCommand(command="moderator", description="Панель старосты"),
-    "admin": BotCommand(command="admin", description="Админка"),
+    "admin": BotCommand(command="admin", description="Панель Админа"),
 }
+
+
+def panel_name(kind: str | None) -> str:
+    """Как называется панель: у админов — «Панель Админа», у старост — «Панель старосты»."""
+    return "Панель Админа" if kind == "admin" else "Панель старосты"
 
 
 def staff_kind(chat_id: int, student: Student | None) -> str | None:
@@ -211,17 +216,17 @@ def queue_text(subject: Subject, rows: list[Row], me: int | None = None, subgrou
     """Живая очередь: сверху желающие сдать, ниже остальные. me — id человека из списка.
     subgroup — показать только эту подгруппу (порядок тот же, номера — внутри подгруппы)."""
     title = f" · {subgroup} подгруппа" if subgroup else ""
-    text = f"📋 <b>{esc(subject.name)}</b> — очередь сейчас{title}\n"
+    text = f"📋 <b>{esc(subject.title)}</b> — очередь сейчас{title}\n"
     if not rows:
-        return text + "\nСписок группы пока пуст — админ загружает его в админке → Люди."
+        return text + "\nСписок группы пока пуст — админ загружает его в Панели Админа → Люди."
     if subgroup:
         rows = [r for r in rows if r.subgroup == subgroup]
         if not rows:
-            return text + f"\nВ {subgroup} подгруппе пока никого нет — админ отмечает подгруппы в админке → Люди."
+            return text + f"\nВ {subgroup} подгруппе пока никого нет — админ отмечает подгруппы в Панели Админа → Люди."
     def section(r: Row) -> str:
         if r.wants:
             return f"{WANT} <b>Хотят сдать следующее:</b>"
-        return "<b>Остальные</b> (меньше сдано — выше):" if r.in_bot else "▫️ <b>Ещё не в боте</b> (без приоритета):"
+        return "<b>Остальные</b> (меньше сдано — выше):" if r.in_bot else "❎ <b>Ещё не в боте</b> (без приоритета):"
 
     wanting, current = sum(r.wants for r in rows), None
     for i, r in enumerate(rows, 1):

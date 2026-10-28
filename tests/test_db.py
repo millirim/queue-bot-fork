@@ -323,3 +323,120 @@ def test_request_notices(tmp_path):
         assert await db.pop_notices(11) == [(900, 333)]
         await db.close()
     run(go())
+
+
+def test_fresh_db_has_new_subject_names_and_emojis(tmp_path):
+    async def go():
+        db = await make_db(tmp_path)
+        assert {s.name: s.emoji for s in await db.subjects()} == {
+            "ПнаЯВУ": "🔥", "БЖЧ-ПЗ": "🏞", "БЖЧ-ЛР": "🌄", "ЭП": "📱", "БД": "💅",
+        }
+        assert (await db.get_subject(next(s.id for s in await db.subjects() if s.name == "БД"))).title == "💅 БД"
+        await db.close()
+    run(go())
+
+
+def test_old_subjects_are_renamed_once_and_keep_progress(tmp_path):
+    # База как на сервере до этой версии: старые названия БЖЧ, нет колонки emoji и таблицы meta.
+    conn = sqlite3.connect(tmp_path / "queue.db")
+    conn.executescript(
+        "CREATE TABLE students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, "
+        "active INTEGER NOT NULL DEFAULT 1, chat_id INTEGER UNIQUE, username TEXT, role TEXT NOT NULL DEFAULT 'user', "
+        "subgroup INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE subjects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, total INTEGER NOT NULL);"
+        "CREATE TABLE progress (student_id INTEGER NOT NULL, subject_id INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0, "
+        "want_since TEXT, lot INTEGER, undo_until TEXT, undo_want TEXT, PRIMARY KEY (student_id, subject_id));"
+        "INSERT INTO students (name) VALUES ('Иванов Иван');"
+        "INSERT INTO subjects (name, total) VALUES ('БЖЧ — лабы', 7), ('БЖЧ — практики', 6), ('БД', 6), ('Свой предмет', 3);"
+        "INSERT INTO progress (student_id, subject_id, done) VALUES (1, 1, 4);"
+        "PRAGMA user_version = 4;"
+    )
+    conn.close()
+
+    async def go():
+        db = await make_db(tmp_path)
+        by_name = {s.name: s for s in await db.subjects()}
+        assert set(by_name) == {"БЖЧ-ЛР", "БЖЧ-ПЗ", "БД", "Свой предмет"}
+        assert by_name["БЖЧ-ЛР"].emoji == "🌄" and by_name["БЖЧ-ПЗ"].emoji == "🏞" and by_name["БД"].emoji == "💅"
+        assert by_name["Свой предмет"].emoji == "📚"  # незнакомые предметы не трогаем
+        assert (await db.get_row(by_name["БЖЧ-ЛР"].id, 1))[1].done == 4  # сданные на месте
+
+        # Админ поменял эмодзи вручную — перезапуск бота это не откатывает (миграция одноразовая).
+        await db.set_subject_emoji(by_name["БД"].id, "📚")
+        await db.close()
+        db = await make_db(tmp_path)
+        assert (await db.get_subject(by_name["БД"].id)).emoji == "📚"
+        await db.close()
+    run(go())
+
+
+def test_standing_overall_and_in_subgroup(tmp_path):
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_students(["Аа Аа", "Бб Бб", "Вв Вв", "Гг Гг"])
+        s = await ids(db)
+        await db.set_subgroups(["Аа Аа", "Вв Вв"], 1)
+        await db.set_subgroups(["Бб Бб", "Гг Гг"], 2)
+        bd = await subject_id(db, "БД")
+        await db.change_done(s["Аа"], bd, 2)  # у Аа сдано больше — ниже в очереди
+        a = await db.standing(bd, s["Аа"])
+        assert (a.place, a.total, a.sub_place, a.sub_total) == (4, 4, 2, 2)  # последний и в общей, и в подгруппе
+        g = await db.standing(bd, s["Гг"])
+        assert (g.place, g.sub_place, g.sub_total) == (3, 2, 2)  # 3-й в общей, 2-й из двух во 2 подгруппе
+        await db.set_subgroups(["Аа Аа"], 0)
+        assert (await db.standing(bd, s["Аа"])).sub_place == 0  # подгруппа не указана — места в ней нет
+        assert await db.standing(bd, 999) is None
+        await db.close()
+    run(go())
+
+
+def test_backup_zip_name_and_content(tmp_path, monkeypatch):
+    import io
+    import zipfile
+    from datetime import datetime
+    import db as dbmod
+    monkeypatch.setattr(dbmod, "local_now", lambda: datetime(2026, 10, 28, 12, 50))
+
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_students(["Иванов Иван"])
+        name, data = await db.backup_zip()
+        assert name == "bd-513802-28-10-2026-1250.zip"
+        z = zipfile.ZipFile(io.BytesIO(data))
+        assert z.namelist() == ["queue.db"]
+        copy = tmp_path / "restored.db"
+        copy.write_bytes(z.read("queue.db"))
+        conn = sqlite3.connect(copy)
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT name FROM students").fetchall() == [("Иванов Иван",)]
+        assert conn.execute("SELECT COUNT(*) FROM subjects").fetchone()[0] == 5
+        conn.close()
+        await db.close()
+    run(go())
+
+
+def test_server_log_storage_filters_and_limit(tmp_path, monkeypatch):
+    import db as dbmod
+    monkeypatch.setattr(dbmod, "LOG_KEEP", 4)
+
+    async def go():
+        db = await make_db(tmp_path)
+        rows = [
+            ("2026-10-28T10:00:01", "INFO", "queue-bot", "запуск", None),
+            ("2026-10-28T10:00:02", "INFO", "aiogram.event", "Update id=1 is handled. Duration 5 ms by bot id=7", None),
+            ("2026-10-28T10:00:03", "WARNING", "queue-bot", "предупреждение", None),
+            ("2026-10-28T10:00:04", "ERROR", "aiogram.event", "ошибка", "Traceback…\nValueError: плохо"),
+        ]
+        await db.add_server_logs(rows)
+        events, more = await db.server_logs("events", 0, 10)
+        assert [r.message for r in events] == ["ошибка", "предупреждение", "запуск"] and not more  # шум «handled» скрыт
+        assert [r.level for r in (await db.server_logs("errors", 0, 10))[0]] == ["ERROR", "WARNING"]
+        assert len((await db.server_logs("all", 0, 10))[0]) == 4
+        page, more = await db.server_logs("all", 0, 2)
+        assert len(page) == 2 and more  # есть страница старее
+        assert (await db.last_error_trace()).trace.endswith("ValueError: плохо")
+        await db.add_server_logs([("2026-10-28T10:00:05", "INFO", "x", "ещё", None),
+                                  ("2026-10-28T10:00:06", "INFO", "x", "ещё2", None)])
+        assert len((await db.server_logs("all", 0, 100))[0]) == 4  # хранятся только последние LOG_KEEP
+        await db.close()
+    run(go())

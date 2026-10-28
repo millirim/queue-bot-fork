@@ -1,5 +1,7 @@
 import logging
 import os
+import tempfile
+import zipfile
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -13,6 +15,7 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
 UNDO_SECONDS = 60  # сколько можно отменить своё «Сдал»
+LOG_KEEP = 5000    # сколько последних серверных логов хранить
 
 SCHEMA = """
 -- Список группы. Аккаунт Telegram привязывается к человеку из списка после подтверждения.
@@ -64,11 +67,28 @@ CREATE TABLE IF NOT EXISTS minus_requests (
     UNIQUE (student_id, subject_id)
 );
 
--- Предметы и сколько по ним всего работ. Меняется в админке.
+-- Предметы и сколько по ним всего работ. Меняется в панели админа.
 CREATE TABLE IF NOT EXISTS subjects (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
     name  TEXT NOT NULL UNIQUE,
-    total INTEGER NOT NULL
+    total INTEGER NOT NULL,
+    emoji TEXT NOT NULL DEFAULT '📚'
+);
+
+-- Служебные отметки: какие разовые миграции уже выполнены.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Серверные логи (logsink.py): всё, что бот пишет через logging. Хранятся последние 5000 строк.
+CREATE TABLE IF NOT EXISTS server_log (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    at      TEXT NOT NULL,                 -- местное время, ISO
+    level   TEXT NOT NULL,                 -- INFO / WARNING / ERROR ...
+    logger  TEXT NOT NULL,
+    message TEXT NOT NULL,
+    trace   TEXT                           -- traceback, если был
 );
 
 -- Сколько человек сдал по предмету и хочет ли сдать следующее.
@@ -136,6 +156,22 @@ class Subject:
     id: int
     name: str
     total: int
+    emoji: str = "📚"
+
+    @property
+    def title(self) -> str:
+        """Название с эмодзи — так предмет показывается в кнопках и заголовках."""
+        return f"{self.emoji} {self.name}"
+
+
+@dataclass
+class Standing:
+    """Где человек в очереди по предмету: общая очередь и своя подгруппа (sub_place = 0 — подгруппа не указана)."""
+    row: Row
+    place: int
+    total: int
+    sub_place: int
+    sub_total: int
 
 
 @dataclass
@@ -144,6 +180,15 @@ class MinusRequest:
     student: Student
     subject: Subject
     reason: str
+
+
+@dataclass
+class ServerLog:
+    at: datetime
+    level: str
+    logger: str
+    message: str
+    trace: str | None
 
 
 @dataclass
@@ -160,7 +205,7 @@ def _student(row) -> Student:
 
 
 def _subject(row) -> Subject:
-    return Subject(row["id"], row["name"], row["total"])
+    return Subject(row["id"], row["name"], row["total"], row["emoji"])
 
 
 def local_now() -> datetime:
@@ -220,13 +265,30 @@ class Database:
         await self._add_column("progress", "undo_until", "TEXT")
         await self._add_column("progress", "undo_want", "TEXT")
         await self._add_column("request_notices", "kind", "TEXT NOT NULL DEFAULT 'reg'")
+        await self._add_column("subjects", "emoji", "TEXT NOT NULL DEFAULT '📚'")
+        await self.conn.commit()
+        await self._migrate_subjects()
+
+    async def _migrate_subjects(self) -> None:
+        """Один раз: прежние названия БЖЧ → БЖЧ-ЛР / БЖЧ-ПЗ и эмодзи тем, у кого стоит стандартный 📚."""
+        if await self._one("SELECT 1 FROM meta WHERE key = 'subjects-v2'"):
+            return
+        for old, new in config.LEGACY_SUBJECT_NAMES.items():
+            if await self._one("SELECT 1 FROM subjects WHERE name = ?", (old,)) and not await self._one(
+                "SELECT 1 FROM subjects WHERE name = ?", (new,)
+            ):
+                await self.conn.execute("UPDATE subjects SET name = ? WHERE name = ?", (new, old))
+        for name, (_, emoji) in config.SUBJECTS.items():
+            await self.conn.execute("UPDATE subjects SET emoji = ? WHERE name = ? AND emoji = '📚'", (emoji, name))
+        await self.conn.execute("INSERT INTO meta (key, value) VALUES ('subjects-v2', 'done')")
         await self.conn.commit()
 
     async def _seed_subjects(self) -> None:
         if (await self._one("SELECT COUNT(*) AS c FROM subjects"))["c"]:
             return
-        for name, total in config.SUBJECTS.items():
-            await self.conn.execute("INSERT INTO subjects (name, total) VALUES (?, ?)", (name, total))
+        for name, (total, emoji) in config.SUBJECTS.items():
+            await self.conn.execute("INSERT INTO subjects (name, total, emoji) VALUES (?, ?, ?)", (name, total, emoji))
+        await self.conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('subjects-v2', 'done')")
         await self.conn.commit()
 
     async def close(self) -> None:
@@ -399,12 +461,15 @@ class Database:
         row = await self._one("SELECT * FROM subjects WHERE id = ?", (subject_id,))
         return _subject(row) if row else None
 
-    async def add_subject(self, name: str, total: int) -> bool:
+    async def add_subject(self, name: str, total: int, emoji: str = "📚") -> bool:
         """False — предмет с таким названием уже есть."""
         if await self._one("SELECT 1 FROM subjects WHERE name = ?", (name,)):
             return False
-        await self._write("INSERT INTO subjects (name, total) VALUES (?, ?)", (name, total))
+        await self._write("INSERT INTO subjects (name, total, emoji) VALUES (?, ?, ?)", (name, total, emoji))
         return True
+
+    async def set_subject_emoji(self, subject_id: int, emoji: str) -> None:
+        await self._write("UPDATE subjects SET emoji = ? WHERE id = ?", (emoji, subject_id))
 
     async def rename_subject(self, subject_id: int, name: str) -> bool:
         if await self._one("SELECT 1 FROM subjects WHERE name = ? AND id != ?", (name, subject_id)):
@@ -449,6 +514,16 @@ class Database:
         rows = await self._all("SELECT student_id, work, lot FROM lots WHERE subject_id = ? AND day = ?", (subject_id, day))
         work = {student_id: done + 1 for student_id, done in wanting}
         return {r["student_id"]: r["lot"] for r in rows if work.get(r["student_id"]) == r["work"]}
+
+    async def standing(self, subject_id: int, student_id: int) -> "Standing | None":
+        """Место человека в общей очереди и в своей подгруппе (подгруппа — только если указана)."""
+        rows = await self.queue(subject_id)
+        for place, row in enumerate(rows, 1):
+            if row.student_id == student_id:
+                sub_rows = [r for r in rows if r.subgroup == row.subgroup] if row.subgroup else []
+                sub_place = sub_rows.index(row) + 1 if sub_rows else 0
+                return Standing(row, place, len(rows), sub_place, len(sub_rows))
+        return None
 
     async def get_row(self, subject_id: int, student_id: int) -> tuple[int, Row] | None:
         """(место, строка) человека в очереди по предмету."""
@@ -556,6 +631,54 @@ class Database:
     async def delete_minus(self, request_id: int) -> bool:
         return await self._write("DELETE FROM minus_requests WHERE id = ?", (request_id,)) > 0
 
+    # --- серверные логи ---
+    async def add_server_logs(self, records: list[tuple[str, str, str, str, str | None]]) -> None:
+        """Пачка (at, level, logger, message, trace) из logsink; хранятся последние LOG_KEEP строк."""
+        if not records:
+            return
+        await self.conn.executemany(
+            "INSERT INTO server_log (at, level, logger, message, trace) VALUES (?, ?, ?, ?, ?)", records
+        )
+        await self.conn.execute(
+            "DELETE FROM server_log WHERE id <= (SELECT MAX(id) FROM server_log) - ?", (LOG_KEEP,)
+        )
+        await self.conn.commit()
+
+    # Режимы просмотра логов: фильтр по уровню и без однотипных «Update … is handled».
+    LOG_FILTERS = {
+        "events": "level != 'DEBUG' AND NOT (logger = 'aiogram.event' AND message LIKE 'Update id=%is handled%')",
+        "errors": "level IN ('WARNING', 'ERROR', 'CRITICAL')",
+        "all": "1 = 1",
+    }
+
+    async def server_logs(self, mode: str, offset: int, limit: int) -> tuple[list[ServerLog], bool]:
+        """Страница логов, новые сверху. Второе значение — есть ли ещё старее."""
+        rows = await self._all(
+            f"SELECT * FROM server_log WHERE {self.LOG_FILTERS[mode]} ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit + 1, offset),
+        )
+        logs = [ServerLog(datetime.fromisoformat(r["at"]), r["level"], r["logger"], r["message"], r["trace"])
+                for r in rows[:limit]]
+        return logs, len(rows) > limit
+
+    async def last_error_trace(self) -> ServerLog | None:
+        r = await self._one("SELECT * FROM server_log WHERE trace IS NOT NULL ORDER BY id DESC LIMIT 1")
+        return ServerLog(datetime.fromisoformat(r["at"]), r["level"], r["logger"], r["message"], r["trace"]) if r else None
+
+    # --- копия базы ---
+    async def backup_zip(self) -> tuple[str, bytes]:
+        """(имя файла, zip) с полной согласованной копией базы: bd-группа-дд-мм-гггг-ччмм.zip."""
+        now = local_now()
+        name = f"bd-{config.GROUP_NO}-{now:%d-%m-%Y-%H%M}.zip"
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = os.path.join(tmp, "queue.db")
+            await self.conn.execute("VACUUM INTO ?", (copy,))  # согласованная копия, даже пока бот работает
+            archive = os.path.join(tmp, name)
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
+                z.write(copy, "queue.db")
+            with open(archive, "rb") as f:
+                return name, f.read()
+
     # --- журнал ---
     async def log_action(self, actor_id: int, actor_name: str, text: str) -> None:
         await self._write(
@@ -565,5 +688,10 @@ class Database:
 
     async def journal(self, limit: int = 40) -> list[AuditRecord]:
         """Последние действия, новые сверху."""
-        rows = await self._all("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,))
-        return [AuditRecord(datetime.fromisoformat(r["at"]), r["actor_name"], r["text"]) for r in rows]
+        return (await self.journal_page(0, limit))[0]
+
+    async def journal_page(self, offset: int, limit: int) -> tuple[list[AuditRecord], bool]:
+        """Страница журнала действий, новые сверху. Второе значение — есть ли ещё старее."""
+        rows = await self._all("SELECT * FROM audit ORDER BY id DESC LIMIT ? OFFSET ?", (limit + 1, offset))
+        records = [AuditRecord(datetime.fromisoformat(r["at"]), r["actor_name"], r["text"]) for r in rows[:limit]]
+        return records, len(rows) > limit
