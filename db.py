@@ -2,7 +2,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiosqlite
 
@@ -12,6 +12,7 @@ from ranking import Row, draw_lot, order
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
+UNDO_SECONDS = 60  # сколько можно отменить своё «Сдал»
 
 SCHEMA = """
 -- Список группы. Аккаунт Telegram привязывается к человеку из списка после подтверждения.
@@ -36,9 +37,31 @@ CREATE TABLE IF NOT EXISTS requests (
 
 -- Кому и каким сообщением отправлена заявка — чтобы убрать кнопки у всех, когда её рассмотрят.
 CREATE TABLE IF NOT EXISTS request_notices (
-    applicant  INTEGER NOT NULL,           -- chat_id того, кто подал заявку
+    applicant  INTEGER NOT NULL,           -- reg: chat_id подавшего; minus: id заявки на −1
     reviewer   INTEGER NOT NULL,
-    message_id INTEGER NOT NULL
+    message_id INTEGER NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'reg' -- reg — регистрация, minus — заявка на −1
+);
+
+-- Жребий: одно число на человека, предмет, номер работы и день. Подкрутить нажатиями нельзя,
+-- а в полночь у всех новый (на новой паре равные тянут заново).
+CREATE TABLE IF NOT EXISTS lots (
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    work       INTEGER NOT NULL,           -- какую по счёту работу сдаёт (сдано + 1)
+    day        TEXT NOT NULL,              -- местная дата
+    lot        INTEGER NOT NULL,
+    PRIMARY KEY (student_id, subject_id, work, day)
+);
+
+-- Заявки «уменьшить сданные на 1» с причиной. Решают староста или админ.
+CREATE TABLE IF NOT EXISTS minus_requests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    reason     TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (student_id, subject_id)
 );
 
 -- Предметы и сколько по ним всего работ. Меняется в админке.
@@ -54,7 +77,9 @@ CREATE TABLE IF NOT EXISTS progress (
     subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     done       INTEGER NOT NULL DEFAULT 0,
     want_since TEXT,                        -- когда нажал «хочу сдать следующее», NULL — не хочет
-    lot        INTEGER,                     -- жребий среди равных (ranking.draw_lot), до «Сдал»
+    lot        INTEGER,                     -- устарело: жребий теперь в таблице lots
+    undo_until TEXT,                        -- до какого времени можно отменить своё «Сдал»
+    undo_want  TEXT,                        -- отметка «хочу сдать», которую вернёт отмена
     PRIMARY KEY (student_id, subject_id)
 );
 
@@ -111,6 +136,14 @@ class Subject:
     id: int
     name: str
     total: int
+
+
+@dataclass
+class MinusRequest:
+    id: int
+    student: Student
+    subject: Subject
+    reason: str
 
 
 @dataclass
@@ -184,11 +217,9 @@ class Database:
     async def _add_new_columns(self) -> None:
         await self._add_column("students", "subgroup", "INTEGER NOT NULL DEFAULT 0")
         await self._add_column("progress", "lot", "INTEGER")
-        for r in await self._all("SELECT student_id, subject_id FROM progress WHERE want_since IS NOT NULL AND lot IS NULL"):
-            await self.conn.execute(
-                "UPDATE progress SET lot = ? WHERE student_id = ? AND subject_id = ?",
-                (draw_lot(), r["student_id"], r["subject_id"]),
-            )
+        await self._add_column("progress", "undo_until", "TEXT")
+        await self._add_column("progress", "undo_want", "TEXT")
+        await self._add_column("request_notices", "kind", "TEXT NOT NULL DEFAULT 'reg'")
         await self.conn.commit()
 
     async def _seed_subjects(self) -> None:
@@ -340,16 +371,17 @@ class Database:
         student = await self.link(chat_id, request.username, request.student.id)
         return student or "Это ФИО уже занято другим аккаунтом — заявка удалена"
 
-    async def add_notice(self, applicant: int, reviewer: int, message_id: int) -> None:
+    async def add_notice(self, applicant: int, reviewer: int, message_id: int, kind: str = "reg") -> None:
         await self._write(
-            "INSERT INTO request_notices (applicant, reviewer, message_id) VALUES (?, ?, ?)",
-            (applicant, reviewer, message_id),
+            "INSERT INTO request_notices (applicant, reviewer, message_id, kind) VALUES (?, ?, ?, ?)",
+            (applicant, reviewer, message_id, kind),
         )
 
-    async def pop_notices(self, applicant: int) -> list[tuple[int, int]]:
+    async def pop_notices(self, applicant: int, kind: str = "reg") -> list[tuple[int, int]]:
         """(reviewer, message_id) всех уведомлений о заявке; из базы они удаляются."""
-        rows = await self._all("SELECT reviewer, message_id FROM request_notices WHERE applicant = ?", (applicant,))
-        await self._write("DELETE FROM request_notices WHERE applicant = ?", (applicant,))
+        args = (applicant, kind)
+        rows = await self._all("SELECT reviewer, message_id FROM request_notices WHERE applicant = ? AND kind = ?", args)
+        await self._write("DELETE FROM request_notices WHERE applicant = ? AND kind = ?", args)
         return [(r["reviewer"], r["message_id"]) for r in rows]
 
     async def reject(self, chat_id: int) -> Request | None:
@@ -391,15 +423,32 @@ class Database:
     async def queue(self, subject_id: int) -> list[Row]:
         """Вся группа по предмету в порядке очереди (ranking.order)."""
         rows = await self._all(
-            "SELECT s.id, s.name, s.chat_id, s.subgroup, COALESCE(p.done, 0) AS done, p.want_since, p.lot FROM students s "
+            "SELECT s.id, s.name, s.chat_id, s.subgroup, COALESCE(p.done, 0) AS done, p.want_since FROM students s "
             "LEFT JOIN progress p ON p.student_id = s.id AND p.subject_id = ? WHERE s.active = 1",
             (subject_id,),
         )
+        lots = await self._lots(subject_id, [(r["id"], r["done"]) for r in rows if r["want_since"]])
         return order([
-            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, r["lot"], r["chat_id"] is not None,
-                r["subgroup"])
+            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, lots.get(r["id"]),
+                r["chat_id"] is not None, r["subgroup"])
             for r in rows
         ])
+
+    async def _lots(self, subject_id: int, wanting: list[tuple[int, int]]) -> dict[int, int]:
+        """Жребий для каждого желающего: на (работа = сдано + 1, сегодня). Нет — бросается сейчас, один раз."""
+        if not wanting:
+            return {}
+        day = local_now().date().isoformat()
+        await self.conn.execute("DELETE FROM lots WHERE day < ?", (day,))
+        for student_id, done in wanting:
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO lots (student_id, subject_id, work, day, lot) VALUES (?, ?, ?, ?, ?)",
+                (student_id, subject_id, done + 1, day, draw_lot()),
+            )
+        await self.conn.commit()
+        rows = await self._all("SELECT student_id, work, lot FROM lots WHERE subject_id = ? AND day = ?", (subject_id, day))
+        work = {student_id: done + 1 for student_id, done in wanting}
+        return {r["student_id"]: r["lot"] for r in rows if work.get(r["student_id"]) == r["work"]}
 
     async def get_row(self, subject_id: int, student_id: int) -> tuple[int, Row] | None:
         """(место, строка) человека в очереди по предмету."""
@@ -416,11 +465,10 @@ class Database:
     async def set_want(self, student_id: int, subject_id: int, want: bool) -> None:
         await self._ensure_progress(student_id, subject_id)
         if want:
-            # Жребий бросается один раз и не перебрасывается, если опустить и поднять руку снова.
+            # Жребий — в lots: на работу и день, поэтому опустить и поднять руку ничего не меняет.
             await self._write(
-                "UPDATE progress SET want_since = COALESCE(want_since, ?), lot = COALESCE(lot, ?) "
-                "WHERE student_id = ? AND subject_id = ?",
-                (local_now().isoformat(timespec="seconds"), draw_lot(), student_id, subject_id),
+                "UPDATE progress SET want_since = COALESCE(want_since, ?) WHERE student_id = ? AND subject_id = ?",
+                (local_now().isoformat(timespec="seconds"), student_id, subject_id),
             )
         else:
             await self._write(
@@ -428,23 +476,85 @@ class Database:
             )
 
     async def change_done(self, student_id: int, subject_id: int, delta: int) -> int | None:
-        """Меняет число сданных на delta (в пределах 0..всего работ). «Сдал» (+1) снимает отметку
-        «хочу сдать» и жребий — на следующую работу он бросится заново. Возвращает новое число или None."""
+        """Меняет число сданных на delta (в пределах 0..всего работ) — так правят староста и админ, а «−1»
+        по одобренной заявке. +1 снимает отметку «хочу сдать». Возвращает новое число или None."""
         subject = await self.get_subject(subject_id)
         if subject is None:
             return None
         await self._ensure_progress(student_id, subject_id)
         changed = await self._write(
             "UPDATE progress SET done = done + ?, want_since = CASE WHEN ? > 0 THEN NULL ELSE want_since END, "
-            "lot = CASE WHEN ? > 0 THEN NULL ELSE lot END "
+            "undo_until = NULL, undo_want = NULL "
             "WHERE student_id = ? AND subject_id = ? AND done + ? BETWEEN 0 AND ?",
-            (delta, delta, delta, student_id, subject_id, delta, subject.total),
+            (delta, delta, student_id, subject_id, delta, subject.total),
         )
         if not changed:
             return None
         return (await self._one(
             "SELECT done FROM progress WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
         ))["done"]
+
+    async def mark_done(self, student_id: int, subject_id: int) -> int | None:
+        """«Сдал» самого человека: +1, отметка «хочу сдать» снимается, минуту можно отменить."""
+        progress = await self._one(
+            "SELECT want_since FROM progress WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
+        )
+        done = await self.change_done(student_id, subject_id, 1)
+        if done is not None:
+            until = (local_now() + timedelta(seconds=UNDO_SECONDS)).isoformat(timespec="seconds")
+            await self._write(
+                "UPDATE progress SET undo_until = ?, undo_want = ? WHERE student_id = ? AND subject_id = ?",
+                (until, progress["want_since"] if progress else None, student_id, subject_id),
+            )
+        return done
+
+    async def undo_until(self, student_id: int, subject_id: int) -> datetime | None:
+        row = await self._one(
+            "SELECT undo_until FROM progress WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
+        )
+        until = datetime.fromisoformat(row["undo_until"]) if row and row["undo_until"] else None
+        return until if until and until > local_now() else None
+
+    async def undo_done(self, student_id: int, subject_id: int) -> int | None:
+        """Отменяет своё «Сдал», если не прошла минута: всё как было, жребий тот же. None — поздно."""
+        if not await self.undo_until(student_id, subject_id):
+            return None
+        await self._write(
+            "UPDATE progress SET done = done - 1, want_since = undo_want, undo_until = NULL, undo_want = NULL "
+            "WHERE student_id = ? AND subject_id = ? AND done > 0",
+            (student_id, subject_id),
+        )
+        return (await self._one(
+            "SELECT done FROM progress WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
+        ))["done"]
+
+    # --- заявки на −1 ---
+    async def create_minus(self, student_id: int, subject_id: int, reason: str) -> tuple[int, int | None]:
+        """Новая заявка на −1 (старая по этому предмету заменяется). Возвращает (id новой, id заменённой)."""
+        old = await self._one(
+            "SELECT id FROM minus_requests WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
+        )
+        if old:
+            await self.conn.execute("DELETE FROM minus_requests WHERE id = ?", (old["id"],))
+        cur = await self.conn.execute(
+            "INSERT INTO minus_requests (student_id, subject_id, reason) VALUES (?, ?, ?)", (student_id, subject_id, reason)
+        )
+        await self.conn.commit()
+        return cur.lastrowid, old["id"] if old else None
+
+    async def get_minus(self, request_id: int) -> MinusRequest | None:
+        row = await self._one("SELECT * FROM minus_requests WHERE id = ?", (request_id,))
+        if not row:
+            return None
+        return MinusRequest(row["id"], await self.get_student(row["student_id"]), await self.get_subject(row["subject_id"]),
+                            row["reason"])
+
+    async def pending_minus(self) -> list[MinusRequest]:
+        rows = await self._all("SELECT id FROM minus_requests ORDER BY created_at")
+        return [await self.get_minus(r["id"]) for r in rows]
+
+    async def delete_minus(self, request_id: int) -> bool:
+        return await self._write("DELETE FROM minus_requests WHERE id = ?", (request_id,)) > 0
 
     # --- журнал ---
     async def log_action(self, actor_id: int, actor_name: str, text: str) -> None:

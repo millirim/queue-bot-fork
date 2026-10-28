@@ -16,7 +16,7 @@ from common import (
     btn, check_name, esc, is_admin, is_owner, kb, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, works,
 )
-from db import ROLES, Database, Request, Student, parse_roster
+from db import ROLES, Database, MinusRequest, Request, Student, parse_roster
 from ranking import WANT
 
 router = Router()
@@ -80,7 +80,7 @@ async def notify(bot: Bot, student: Student, text: str, markup=None) -> None:
 
 # ================= меню =================
 async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff):
-    pending = len(await db.pending_requests())
+    pending = len(await db.pending_requests()) + len(await db.pending_minus())
     rows = [
         [btn(f"📨 Заявки ({pending})" if pending else "📨 Заявки", "ar")],
         [btn("👥 Люди", "ap"), btn("📋 Сданные", "aq")],
@@ -143,23 +143,83 @@ async def notify_reviewers(bot: Bot, db: Database, request: Request, full_name: 
         await asyncio.sleep(0.05)
 
 
-async def close_notices(bot: Bot, db: Database, applicant: int, text: str) -> None:
+async def close_notices(bot: Bot, db: Database, applicant: int, text: str, kind: str = "reg") -> None:
     """Меняет у всех проверяющих сообщение о заявке на итог и убирает кнопки."""
-    for reviewer, message_id in await db.pop_notices(applicant):
+    for reviewer, message_id in await db.pop_notices(applicant, kind):
         await edit_sent(bot, reviewer, message_id, text)
         await asyncio.sleep(0.05)
 
 
 async def show_requests(target: CallbackQuery, db: Database, ack: bool = True):
-    pending = await db.pending_requests()
-    if not pending:
+    pending, minus = await db.pending_requests(), await db.pending_minus()
+    if not pending and not minus:
         await show(target, "📨 Новых заявок нет.", kb([ADMIN_BTN]), ack)
         return
-    text, rows = "📨 <b>Заявки</b> — Telegram → кем себя назвал\n\n", []
-    for i, r in enumerate(pending, 1):
-        text += f"{i}. {request_text(r)}\n"
-        rows.append([btn(f"✅ Принять {i}", f"rq:ok:{r.chat_id}:l"), btn(f"❌ Отклонить {i}", f"rq:no:{r.chat_id}:l")])
+    text, rows = "", []
+    if pending:
+        text += "📨 <b>Вход в бота</b> — Telegram → кем себя назвал\n\n"
+        for i, r in enumerate(pending, 1):
+            text += f"{i}. {request_text(r)}\n"
+            rows.append([btn(f"✅ Принять {i}", f"rq:ok:{r.chat_id}:l"), btn(f"❌ Отклонить {i}", f"rq:no:{r.chat_id}:l")])
+    if minus:
+        text += "\n🙏 <b>Просят −1</b>\n\n"
+        for i, m in enumerate(minus, 1):
+            text += f"−{i}. {minus_text(m)}\n"
+            rows.append([btn(f"✅ Одобрить −{i}", f"mr:ok:{m.id}:l"), btn(f"❌ Отклонить −{i}", f"mr:no:{m.id}:l")])
     await show(target, text, kb(*rows, [ADMIN_BTN]), ack)
+
+
+def minus_text(m: MinusRequest) -> str:
+    return f"<b>{esc(short_name(m.student.name))}</b> · {esc(m.subject.name)}\nПричина: <i>{esc(m.reason)}</i>"
+
+
+async def notify_minus(bot: Bot, db: Database, request: MinusRequest) -> None:
+    """Заявка на −1 — старостам и админам, кроме самого просящего."""
+    reviewers = sorted((config.ADMIN_IDS | set(await db.staff_chats())) - {request.student.chat_id})
+    found = await db.get_row(request.subject.id, request.student.id)
+    done = f" (сейчас {found[1].done}/{request.subject.total})" if found else ""
+    text = f"🙏 <b>Заявка на −1</b>{done}\n\n{minus_text(request)}"
+    markup = kb([btn("✅ Одобрить", f"mr:ok:{request.id}"), btn("❌ Отклонить", f"mr:no:{request.id}")])
+    for reviewer in reviewers:
+        if msg := await send(bot, reviewer, text, markup):
+            await db.add_notice(request.id, reviewer, msg.message_id, kind="minus")
+        await asyncio.sleep(0.05)
+
+
+@router.callback_query(F.data.regexp(r"^mr:(ok|no):\d+(:l)?$"))
+async def cb_minus_review(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db)):
+        return
+    parts = cb.data.split(":")
+    approve, request_id, from_list = parts[1] == "ok", int(parts[2]), len(parts) == 4
+    request = await db.get_minus(request_id)
+    if request is None:
+        await cb.answer("Эту заявку уже рассмотрели", show_alert=True)
+        if from_list:
+            await show_requests(cb, db, ack=False)
+        else:
+            await show(cb, "🙏 <b>Заявка на −1</b>\n\nуже рассмотрена", ack=False)
+        return
+    if request.student.chat_id == cb.from_user.id:
+        await cb.answer("Свою заявку решает другой староста или админ", show_alert=True)
+        return
+    subject, s = request.subject, request.student
+    if approve and (done := await db.change_done(s.id, subject.id, -1)) is not None:
+        result = f"✅ одобрена ({esc(staff.signature)}): теперь {done}/{subject.total}"
+        await notify(cb.bot, s, f"✅ Заявку на −1 по <b>{esc(subject.name)}</b> одобрили ({esc(staff.signature)}). "
+                                f"Сдано: {done}/{subject.total}", kb([btn("📋 Очередь", f"s:{subject.id}")]))
+    elif approve:
+        result = "❌ не применена — уменьшать уже нечего"
+    else:
+        result = f"❌ отклонена ({esc(staff.signature)})"
+        await notify(cb.bot, s, f"❌ Заявку на −1 по <b>{esc(subject.name)}</b> отклонили ({esc(staff.signature)}). "
+                                "Если не согласен — поговори со старостой.")
+    await db.delete_minus(request.id)
+    await journal_add(db, staff, f"заявка на −1 {s.name} · {subject.name} «{request.reason}»: {result}")
+    await close_notices(cb.bot, db, request.id, f"🙏 <b>Заявка на −1</b>\n\n{minus_text(request)}\n\n{result}", kind="minus")
+    await cb.answer("Готово")
+    if from_list:
+        await show_requests(cb, db, ack=False)
 
 
 @router.callback_query(F.data == "ar")
@@ -616,6 +676,9 @@ async def cb_progress_change(cb: CallbackQuery, db: Database):
         return
     _, subject_id, student_id, delta, *p = cb.data.split(":")
     subject, s = await db.get_subject(int(subject_id)), await db.get_student(int(student_id))
+    if s and s.chat_id == cb.from_user.id and int(delta) < 0:
+        await cb.answer("Себе «−1» — только через заявку («🙏 Попросить −1» в очереди)", show_alert=True)
+        return
     done = await db.change_done(s.id, subject.id, int(delta)) if subject and s else None
     if done is None:
         await cb.answer("Менять некуда", show_alert=True)

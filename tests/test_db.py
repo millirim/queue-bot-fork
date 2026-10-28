@@ -105,7 +105,12 @@ def test_live_queue(tmp_path):
     run(go())
 
 
-def test_lot_is_drawn_once_and_reset_after_done(tmp_path):
+def test_lot_cannot_be_rerolled_by_any_clicks(tmp_path, monkeypatch):
+    import db as dbmod
+    from datetime import datetime, timedelta
+    clock = [datetime(2026, 10, 28, 10, 0)]
+    monkeypatch.setattr(dbmod, "local_now", lambda: clock[0])
+
     async def go():
         db = await make_db(tmp_path)
         await db.add_students(["Первый Пётр", "Второй Иван"])
@@ -117,15 +122,67 @@ def test_lot_is_drawn_once_and_reset_after_done(tmp_path):
 
         await db.set_want(sid, bd, True)
         first = await lot()
-        assert first is not None
-        await db.set_want(sid, bd, True)
         await db.set_want(sid, bd, False)
         await db.set_want(sid, bd, True)
-        assert await lot() == first  # опустил и поднял руку — жребий тот же, перебросить нельзя
-        await db.change_done(sid, bd, 1)
-        assert await lot() is None  # «Сдал» — на следующую работу жребий бросится заново
+        assert await lot() == first  # опустил и поднял руку — тот же жребий
+
+        assert await db.mark_done(sid, bd) == 1
+        assert await db.undo_done(sid, bd) == 0  # «Сдал» и сразу «Отменить»
+        row = (await db.get_row(bd, sid))[1]
+        assert row.wants and row.lot == first  # всё как было, жребий тот же
+
+        await db.mark_done(sid, bd)
         await db.set_want(sid, bd, True)
-        assert await lot() is not None
+        second = await lot()  # следующая работа — свой жребий
+        assert second is not None and second != first
+        await db.change_done(sid, bd, -1)  # староста вернул −1 — для этой работы снова тот же первый жребий
+        await db.set_want(sid, bd, True)
+        assert await lot() == first
+
+        clock[0] += timedelta(days=1)  # полночь прошла — у всех новый жребий
+        new_day = await lot()
+        assert new_day is not None and new_day != first
+        assert await lot() == new_day  # и в новый день он тоже не меняется от нажатий
+        await db.close()
+    run(go())
+
+
+def test_undo_only_within_a_minute(tmp_path, monkeypatch):
+    import db as dbmod
+    from datetime import datetime, timedelta
+    clock = [datetime(2026, 10, 28, 10, 0)]
+    monkeypatch.setattr(dbmod, "local_now", lambda: clock[0])
+
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_students(["Иванов Иван"])
+        sid = (await ids(db))["Иванов"]
+        bd = await subject_id(db, "БД")
+        await db.mark_done(sid, bd)
+        assert await db.undo_until(sid, bd) == clock[0] + timedelta(seconds=60)
+        clock[0] += timedelta(seconds=61)
+        assert await db.undo_until(sid, bd) is None and await db.undo_done(sid, bd) is None
+        assert (await db.get_row(bd, sid))[1].done == 1
+        await db.close()
+    run(go())
+
+
+def test_minus_requests(tmp_path):
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_students(["Иванов Иван"])
+        sid = (await ids(db))["Иванов"]
+        bd = await subject_id(db, "БД")
+        first, replaced = await db.create_minus(sid, bd, "ошибся")
+        assert replaced is None
+        second, replaced = await db.create_minus(sid, bd, "ошибся дважды")  # повторная заменяет старую
+        assert replaced == first and [m.id for m in await db.pending_minus()] == [second]
+        req = await db.get_minus(second)
+        assert req.reason == "ошибся дважды" and req.student.id == sid and req.subject.id == bd
+        await db.add_notice(second, 900, 1, kind="minus")
+        await db.add_notice(second, 900, 2)  # уведомление о регистрации с тем же номером не путается
+        assert await db.pop_notices(second, "minus") == [(900, 1)]
+        assert await db.delete_minus(second) and not await db.delete_minus(second)
         await db.close()
     run(go())
 
