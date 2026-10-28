@@ -4,9 +4,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import config
-from admin import notify_reviewers
+from admin import close_notices, notify_reviewers
 from common import (
-    btn, esc, is_owner, is_staff, kb, queue_text, refresh_wait, rows_of, set_commands, show, updated_at,
+    btn, esc, is_owner, is_staff, kb, queue_text, refresh_wait, rows_of, set_commands, set_subgroup_view, show,
+    subgroup_buttons, subgroup_view, updated_at,
 )
 from db import Database, Student
 from ranking import RULES, WANT
@@ -123,6 +124,8 @@ async def cb_pick_confirm(cb: CallbackQuery, db: Database):
             await set_commands(cb.bot, chat_id, "admin")
         await show(cb, f"✅ Готово, <b>{esc(student.name)}</b>!\n\n{HELP}", await main_menu(db, chat_id, student))
         return
+    if old := await db.get_request(chat_id):  # выбрал заново — у проверяющих старая заявка закрывается
+        await close_notices(cb.bot, db, chat_id, f"📨 <b>Заявка</b>\n\n{esc(old.student.name)}\n\n↩️ Заменена новой заявкой")
     await db.create_request(chat_id, cb.from_user.username, student_id)
     await notify_reviewers(cb.bot, db, await db.get_request(chat_id), cb.from_user.full_name)
     await show(
@@ -183,7 +186,8 @@ async def cb_profile(cb: CallbackQuery, state: FSMContext, db: Database):
             else "староста ⭐" if student.starosta else "студент")
     await show(
         cb,
-        f"👤 <b>Профиль</b>\n\nФИО: <b>{esc(student.name)}</b>\nРоль: {role}\n\n"
+        f"👤 <b>Профиль</b>\n\nФИО: <b>{esc(student.name)}</b>\n"
+        f"Подгруппа: <b>{student.subgroup or '—'}</b>\nРоль: {role}\n\n"
         "<i>Чтобы исправить ФИО — напиши старосте или админу.</i>",
         kb([btn("ℹ️ Как это работает", "help")], [MENU_BTN]),
     )
@@ -210,8 +214,20 @@ async def show_queue(target: Message | CallbackQuery, db: Database, student: Stu
             row.append(btn("−1", f"sd:{subject.id}:-1"))
         if row:
             buttons.append(row)
+    view = subgroup_view(target.from_user.id)
+    if filters := subgroup_buttons(rows, view, f"sf:{subject.id}"):
+        buttons.append(filters)
     buttons.append([btn("🔄 Обновить", f"sr:{subject.id}"), MENU_BTN])
-    await show(target, queue_text(subject, rows, me=student.id) + updated_at(), kb(*buttons), ack)
+    await show(target, queue_text(subject, rows, me=student.id, subgroup=view) + updated_at(), kb(*buttons), ack)
+
+
+@router.callback_query(F.data.regexp(r"^sf:\d+:[012]$"))
+async def cb_subgroup_filter(cb: CallbackQuery, db: Database):
+    """Фильтр «Все / 1 подгр. / 2 подгр.» — только вид, очередь одна."""
+    if student := await require_student(cb, db):
+        _, subject_id, subgroup = cb.data.split(":")
+        set_subgroup_view(cb.from_user.id, int(subgroup))
+        await show_queue(cb, db, student, int(subject_id))
 
 
 @router.callback_query(F.data.regexp(r"^s:\d+$"))

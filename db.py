@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS students (
     active   INTEGER NOT NULL DEFAULT 1,   -- 0 — убран из группы (например, отчислен)
     chat_id  INTEGER UNIQUE,               -- привязанный Telegram; NULL — ещё не в боте
     username TEXT,
-    role     TEXT NOT NULL DEFAULT 'user'  -- user / starosta / admin
+    role     TEXT NOT NULL DEFAULT 'user', -- user / starosta / admin
+    subgroup INTEGER NOT NULL DEFAULT 0    -- 1, 2; 0 — не указана
 );
 
 -- Заявки «этот аккаунт Telegram — вот этот человек из списка».
@@ -31,6 +32,13 @@ CREATE TABLE IF NOT EXISTS requests (
     username   TEXT,
     student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Кому и каким сообщением отправлена заявка — чтобы убрать кнопки у всех, когда её рассмотрят.
+CREATE TABLE IF NOT EXISTS request_notices (
+    applicant  INTEGER NOT NULL,           -- chat_id того, кто подал заявку
+    reviewer   INTEGER NOT NULL,
+    message_id INTEGER NOT NULL
 );
 
 -- Предметы и сколько по ним всего работ. Меняется в админке.
@@ -75,6 +83,7 @@ class Student:
     chat_id: int | None
     username: str | None
     role: str
+    subgroup: int = 0
 
     @property
     def linked(self) -> bool:
@@ -112,7 +121,9 @@ class AuditRecord:
 
 
 def _student(row) -> Student:
-    return Student(row["id"], row["name"], bool(row["active"]), row["chat_id"], row["username"], row["role"])
+    return Student(
+        row["id"], row["name"], bool(row["active"]), row["chat_id"], row["username"], row["role"], row["subgroup"]
+    )
 
 
 def _subject(row) -> Subject:
@@ -153,7 +164,7 @@ class Database:
         await self.conn.executescript(SCHEMA)
         await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
-        await self._add_lot_column()
+        await self._add_new_columns()
         await self._seed_subjects()
 
     async def _drop_old_schema(self) -> None:
@@ -165,11 +176,14 @@ class Database:
                 await self.conn.execute(f"DROP TABLE IF EXISTS {t}")
             await self.conn.commit()
 
-    async def _add_lot_column(self) -> None:
-        """Жребий появился позже: добавляем колонку в уже существующую базу, данные не трогаем."""
-        columns = {r["name"] for r in await self._all("PRAGMA table_info(progress)")}
-        if "lot" not in columns:
-            await self.conn.execute("ALTER TABLE progress ADD COLUMN lot INTEGER")
+    async def _add_column(self, table: str, column: str, ddl: str) -> None:
+        """Колонки, появившиеся позже: добавляем в уже существующую базу, данные не трогаем."""
+        if column not in {r["name"] for r in await self._all(f"PRAGMA table_info({table})")}:
+            await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+    async def _add_new_columns(self) -> None:
+        await self._add_column("students", "subgroup", "INTEGER NOT NULL DEFAULT 0")
+        await self._add_column("progress", "lot", "INTEGER")
         for r in await self._all("SELECT student_id, subject_id FROM progress WHERE want_since IS NOT NULL AND lot IS NULL"):
             await self.conn.execute(
                 "UPDATE progress SET lot = ? WHERE student_id = ? AND subject_id = ?",
@@ -258,6 +272,24 @@ class Database:
         )
         return student.chat_id
 
+    async def set_subgroup(self, student_id: int, subgroup: int) -> None:
+        assert subgroup in (0, 1, 2)
+        await self._write("UPDATE students SET subgroup = ? WHERE id = ?", (subgroup, student_id))
+
+    async def set_subgroups(self, names: list[str], subgroup: int) -> tuple[list[str], list[str]]:
+        """Ставит подгруппу всем из списка ФИО. Возвращает (отмечены, не найдены в группе)."""
+        by_name = {s.name.casefold(): s for s in await self.students()}
+        found, missing = [], []
+        for name in names:
+            student = by_name.get(name.casefold())
+            if student:
+                await self.conn.execute("UPDATE students SET subgroup = ? WHERE id = ?", (subgroup, student.id))
+                found.append(student.name)
+            else:
+                missing.append(name)
+        await self.conn.commit()
+        return found, missing
+
     async def set_role(self, student_id: int, role: str) -> None:
         assert role in ROLES
         await self._write("UPDATE students SET role = ? WHERE id = ?", (role, student_id))
@@ -308,6 +340,18 @@ class Database:
         student = await self.link(chat_id, request.username, request.student.id)
         return student or "Это ФИО уже занято другим аккаунтом — заявка удалена"
 
+    async def add_notice(self, applicant: int, reviewer: int, message_id: int) -> None:
+        await self._write(
+            "INSERT INTO request_notices (applicant, reviewer, message_id) VALUES (?, ?, ?)",
+            (applicant, reviewer, message_id),
+        )
+
+    async def pop_notices(self, applicant: int) -> list[tuple[int, int]]:
+        """(reviewer, message_id) всех уведомлений о заявке; из базы они удаляются."""
+        rows = await self._all("SELECT reviewer, message_id FROM request_notices WHERE applicant = ?", (applicant,))
+        await self._write("DELETE FROM request_notices WHERE applicant = ?", (applicant,))
+        return [(r["reviewer"], r["message_id"]) for r in rows]
+
     async def reject(self, chat_id: int) -> Request | None:
         request = await self.get_request(chat_id)
         if request:
@@ -347,12 +391,13 @@ class Database:
     async def queue(self, subject_id: int) -> list[Row]:
         """Вся группа по предмету в порядке очереди (ranking.order)."""
         rows = await self._all(
-            "SELECT s.id, s.name, s.chat_id, COALESCE(p.done, 0) AS done, p.want_since, p.lot FROM students s "
+            "SELECT s.id, s.name, s.chat_id, s.subgroup, COALESCE(p.done, 0) AS done, p.want_since, p.lot FROM students s "
             "LEFT JOIN progress p ON p.student_id = s.id AND p.subject_id = ? WHERE s.active = 1",
             (subject_id,),
         )
         return order([
-            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, r["lot"], r["chat_id"] is not None)
+            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, r["lot"], r["chat_id"] is not None,
+                r["subgroup"])
             for r in rows
         ])
 
