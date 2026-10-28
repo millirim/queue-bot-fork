@@ -12,7 +12,8 @@ from aiogram.types import CallbackQuery, Message
 
 import config
 from common import (
-    btn, check_name, esc, is_admin, is_owner, kb, queue_text, rows_of, send, send_many, short_name, show, works,
+    btn, check_name, esc, is_admin, is_owner, kb, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
+    short_name, show, staff_kind, updated_at, works,
 )
 from db import ROLES, Database, Request, Student, parse_roster
 from ranking import WANT
@@ -94,10 +95,22 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
     )
 
 
-@router.message(Command("admin"))
-async def cmd_admin(msg: Message, state: FSMContext, db: Database):
+@router.message(Command("moderator"))
+async def cmd_moderator(msg: Message, state: FSMContext, db: Database):
+    """Панель для старост (админам тоже открывается)."""
     await state.clear()
     if staff := await need_staff(msg, db):
+        await show_menu(msg, db, staff)
+
+
+@router.message(Command("admin"))
+async def cmd_admin(msg: Message, state: FSMContext, db: Database):
+    """Только для админов; старосте подсказываем его команду."""
+    await state.clear()
+    staff = await get_staff(msg.from_user.id, msg.from_user.full_name, db)
+    if staff and not staff.admin:
+        await msg.answer("Твоя команда — /moderator 🙂")
+    elif staff := await need_staff(msg, db, admin_only=True):
         await show_menu(msg, db, staff)
 
 
@@ -167,6 +180,7 @@ async def cb_review(cb: CallbackQuery, db: Database):
             note = f"\n\nТвоя роль — <b>{ROLE_NAMES[student.role]}</b>. {ROLE_NOTES[student.role]}" if student.role != "user" else ""
             await send(cb.bot, chat_id, f"✅ <b>Заявку приняли!</b> Ты — {esc(student.name)}.{note}\n/help — как всё устроено.",
                        kb([btn("📋 Открыть меню", "menu")]))
+            await set_commands(cb.bot, chat_id, staff_kind(chat_id, student))
             await cb.answer("Принята")
             result = f"✅ принята ({esc(staff.signature)})"
     else:
@@ -338,7 +352,7 @@ ROLE_BUTTONS = {"user": "🎓 Студент", "starosta": "⭐ Староста
 ROLE_NAMES = {"user": "студент", "starosta": "староста", "admin": "админ"}
 ROLE_NOTES = {
     "user": "Админка тебе больше недоступна.",
-    "starosta": "Тебе будут приходить заявки, а в меню есть кнопка «🛠 Админка» (или команда /admin): "
+    "starosta": "Тебе будут приходить заявки, а в меню есть кнопка «🛠 Админка» (или команда /moderator): "
                 "заявки, ФИО, сданные, рассылка, журнал.",
     "admin": "В админке тебе доступно всё: список группы, роли, предметы. Кнопка «🛠 Админка» "
              "в меню или команда /admin.",
@@ -367,6 +381,8 @@ async def cb_person_role(cb: CallbackQuery, db: Database):
         await cb.answer(f"Уже {ROLE_NAMES[role]}")
         return
     await db.set_role(s.id, role)
+    if s.linked:
+        await set_commands(cb.bot, s.chat_id, staff_kind(s.chat_id, await db.get_student(s.id)))
     await journal_add(db, staff, f"роль {s.name}: {ROLE_NAMES[s.role]} → {ROLE_NAMES[role]}")
     await notify(cb.bot, s, f"Твоя роль теперь — <b>{ROLE_NAMES[role]}</b> ({esc(staff.signature)}).\n{ROLE_NOTES[role]}")
     await cb.answer(f"Теперь {ROLE_NAMES[role]}")
@@ -390,6 +406,7 @@ async def cb_person_unlink_ok(cb: CallbackQuery, db: Database):
         return
     chat_id = await db.unlink(s.id)
     if chat_id:
+        await set_commands(cb.bot, chat_id, "admin" if is_owner(chat_id) else None)
         await journal_add(db, staff, f"Telegram отвязан от {s.name}")
         await send(cb.bot, chat_id, f"🔓 Твой Telegram отвязан от «{esc(s.name)}» ({esc(staff.signature)}). "
                                     "Выбери себя из списка заново.", kb([btn("📝 Выбрать себя", "reg")]))
@@ -417,6 +434,8 @@ async def cb_person_active(cb: CallbackQuery, db: Database):
         return
     active = action == "auv"
     await db.set_active(s.id, active)
+    if s.linked:
+        await set_commands(cb.bot, s.chat_id, staff_kind(s.chat_id, await db.get_student(s.id)))
     await journal_add(db, staff, f"{s.name} {'возвращён(а) в группу' if active else 'убран(а) из группы'}")
     await notify(cb.bot, s, "↩️ Тебя вернули в группу — бот снова доступен." if active
                  else f"🗂 Тебя убрали из группы в боте ({esc(staff.signature)}). Если это ошибка — напиши старосте.")
@@ -449,10 +468,21 @@ async def show_subject_queue(cb: CallbackQuery, db: Database, subject_id: int, a
     rows = await db.queue(subject.id)
     buttons = [btn(f"{i}. {short_name(r.name)}", f"aqe:{subject.id}:{r.student_id}") for i, r in enumerate(rows, 1)]
     await show(
-        cb, f"{queue_text(subject, rows)}\n<i>Нажми на человека, чтобы поправить его сданные.</i>",
-        kb(*rows_of(buttons), [btn("🔄 Обновить", f"aqs:{subject.id}")], [btn("⬅️ К предметам", "aq"), ADMIN_BTN]),
+        cb, f"{queue_text(subject, rows)}\n<i>Нажми на человека, чтобы поправить его сданные.</i>{updated_at()}",
+        kb(*rows_of(buttons), [btn("🔄 Обновить", f"aqr:{subject.id}")], [btn("⬅️ К предметам", "aq"), ADMIN_BTN]),
         ack,
     )
+
+
+@router.callback_query(F.data.regexp(r"^aqr:\d+$"))
+async def cb_subject_queue_refresh(cb: CallbackQuery, db: Database):
+    if not await need_staff(cb, db):
+        return
+    if wait := refresh_wait(cb.from_user.id):
+        await cb.answer(f"Подожди {wait} с")
+        return
+    await cb.answer("Обновлено")
+    await show_subject_queue(cb, db, int(cb.data[4:]), ack=False)
 
 
 @router.callback_query(F.data.regexp(r"^aqs:\d+$"))

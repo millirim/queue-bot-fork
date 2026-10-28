@@ -4,11 +4,11 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
 
 import admin
 import config
 import handlers
+from common import BASE_COMMANDS, set_commands, staff_kind
 from db import Database
 
 log = logging.getLogger("queue-bot")
@@ -37,15 +37,13 @@ async def main() -> None:
     dp.include_router(admin.router)
     dp.include_router(handlers.router)
 
-    await bot.set_my_commands(
-        [
-            BotCommand(command="start", description="Главное меню"),
-            BotCommand(command="my", description="Мои сданные"),
-            BotCommand(command="cancel", description="Отменить действие"),
-            BotCommand(command="help", description="Как работает очередь"),
-            BotCommand(command="admin", description="Админка (старосты и админы)"),
-        ]
-    )
+    # У всех — обычные команды; у старост добавляется /moderator, у админов — /admin.
+    await bot.set_my_commands(BASE_COMMANDS)
+    for chat_id in config.ADMIN_IDS:
+        await set_commands(bot, chat_id, "admin")
+    for student in await db.students():
+        if student.linked and (kind := staff_kind(student.chat_id, student)):
+            await set_commands(bot, student.chat_id, kind)
 
     try:
         me = await bot.get_me()

@@ -5,7 +5,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import config
 from admin import notify_reviewers
-from common import btn, esc, is_owner, is_staff, kb, queue_text, rows_of, show
+from common import (
+    btn, esc, is_owner, is_staff, kb, queue_text, refresh_wait, rows_of, set_commands, show, updated_at,
+)
 from db import Database, Student
 from ranking import RULES, WANT
 
@@ -117,6 +119,8 @@ async def cb_pick_confirm(cb: CallbackQuery, db: Database):
     # Без админов принимать заявки некому — тогда сразу в бот.
     if is_owner(chat_id) or not config.ADMIN_IDS:
         student = await db.link(chat_id, cb.from_user.username, student_id)
+        if is_owner(chat_id):
+            await set_commands(cb.bot, chat_id, "admin")
         await show(cb, f"✅ Готово, <b>{esc(student.name)}</b>!\n\n{HELP}", await main_menu(db, chat_id, student))
         return
     await db.create_request(chat_id, cb.from_user.username, student_id)
@@ -206,8 +210,8 @@ async def show_queue(target: Message | CallbackQuery, db: Database, student: Stu
             row.append(btn("−1", f"sd:{subject.id}:-1"))
         if row:
             buttons.append(row)
-    buttons.append([btn("🔄 Обновить", f"s:{subject.id}"), MENU_BTN])
-    await show(target, queue_text(subject, rows, me=student.id), kb(*buttons), ack)
+    buttons.append([btn("🔄 Обновить", f"sr:{subject.id}"), MENU_BTN])
+    await show(target, queue_text(subject, rows, me=student.id) + updated_at(), kb(*buttons), ack)
 
 
 @router.callback_query(F.data.regexp(r"^s:\d+$"))
@@ -215,6 +219,18 @@ async def cb_subject(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
     if student := await require_student(cb, db):
         await show_queue(cb, db, student, int(cb.data[2:]))
+
+
+@router.callback_query(F.data.regexp(r"^sr:\d+$"))
+async def cb_refresh(cb: CallbackQuery, db: Database):
+    """«Обновить» с кулдауном, чтобы не упереться в лимиты Telegram."""
+    if not (student := await require_student(cb, db)):
+        return
+    if wait := refresh_wait(cb.from_user.id):
+        await cb.answer(f"Подожди {wait} с")
+        return
+    await cb.answer("Обновлено")
+    await show_queue(cb, db, student, int(cb.data[3:]), ack=False)
 
 
 @router.callback_query(F.data.regexp(r"^sw:\d+:[01]$"))
