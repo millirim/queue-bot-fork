@@ -119,26 +119,37 @@ async def show(
         await target.answer(text, reply_markup=markup)
 
 
-async def send(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> bool:
+async def send(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> Message | None:
+    """Отправленное сообщение или None, если не дошло."""
     for _ in range(3):
         try:
-            await bot.send_message(chat_id, text, reply_markup=markup)
-            return True
+            return await bot.send_message(chat_id, text, reply_markup=markup)
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after)
         except TelegramForbiddenError:
-            return False  # пользователь заблокировал бота
+            return None  # пользователь заблокировал бота
         except TelegramAPIError as e:
             log.warning("Не удалось отправить сообщение %s: %s", chat_id, e)
-            return False
-    return False
+            return None
+    return None
+
+
+async def edit_sent(bot: Bot, chat_id: int, message_id: int, text: str) -> None:
+    """Заменяет текст уже отправленного сообщения и убирает кнопки (ошибки не страшны — сообщение могли удалить)."""
+    try:
+        await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=None)
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        await edit_sent(bot, chat_id, message_id, text)
+    except TelegramAPIError as e:
+        log.info("Не удалось обновить сообщение %s/%s: %s", chat_id, message_id, e)
 
 
 async def send_many(bot: Bot, chat_ids: list[int], text: str, markup: InlineKeyboardMarkup | None = None) -> int:
     """Рассылка с паузой (лимит Telegram ~30 сообщений в секунду). Возвращает, скольким дошло."""
     sent = 0
     for chat_id in chat_ids:
-        sent += await send(bot, chat_id, text, markup)
+        sent += await send(bot, chat_id, text, markup) is not None
         await asyncio.sleep(0.05)
     return sent
 
@@ -175,11 +186,38 @@ def short_name(name: str) -> str:
     return surname + (" " + "".join(f"{p[0]}." for p in rest) if rest else "")
 
 
-def queue_text(subject: Subject, rows: list[Row], me: int | None = None) -> str:
-    """Живая очередь: сверху желающие сдать, ниже остальные. me — id человека из списка."""
-    text = f"📋 <b>{esc(subject.name)}</b> — очередь сейчас\n"
+# Фильтр подгруппы в очереди: 0 — все, 1 или 2. Запоминается на человека, пока бот работает.
+_subgroup_view: dict[int, int] = {}
+
+
+def subgroup_view(chat_id: int) -> int:
+    return _subgroup_view.get(chat_id, 0)
+
+
+def set_subgroup_view(chat_id: int, subgroup: int) -> None:
+    _subgroup_view[chat_id] = subgroup
+
+
+def subgroup_buttons(rows: list[Row], current: int, data: str) -> list[InlineKeyboardButton]:
+    """Кнопки «Все · 1 подгр. · 2 подгр.»; пусто, если подгруппы ещё никому не назначены.
+    data — начало callback, к нему добавляется :0/:1/:2."""
+    if not any(r.subgroup for r in rows):
+        return []
+    titles = {0: "Все", 1: "1 подгр.", 2: "2 подгр."}
+    return [btn(("✓ " if n == current else "") + t, f"{data}:{n}") for n, t in titles.items()]
+
+
+def queue_text(subject: Subject, rows: list[Row], me: int | None = None, subgroup: int = 0) -> str:
+    """Живая очередь: сверху желающие сдать, ниже остальные. me — id человека из списка.
+    subgroup — показать только эту подгруппу (порядок тот же, номера — внутри подгруппы)."""
+    title = f" · {subgroup} подгруппа" if subgroup else ""
+    text = f"📋 <b>{esc(subject.name)}</b> — очередь сейчас{title}\n"
     if not rows:
         return text + "\nСписок группы пока пуст — админ загружает его в админке → Люди."
+    if subgroup:
+        rows = [r for r in rows if r.subgroup == subgroup]
+        if not rows:
+            return text + f"\nВ {subgroup} подгруппе пока никого нет — админ отмечает подгруппы в админке → Люди."
     def section(r: Row) -> str:
         if r.wants:
             return f"{WANT} <b>Хотят сдать следующее:</b>"

@@ -2,6 +2,7 @@
 Админ — ещё список группы, роли (студент/староста/админ), отвязка аккаунтов и предметы.
 Главные админы (ADMIN_IDS в настройках сервера) — как админы, но их нельзя снять из бота.
 Каждое действие пишется в журнал, а тому, кого оно касается, приходит уведомление."""
+import asyncio
 from dataclasses import dataclass
 
 from aiogram import Bot, F, Router
@@ -13,7 +14,7 @@ from aiogram.types import CallbackQuery, Message
 import config
 from common import (
     btn, check_name, esc, is_admin, is_owner, kb, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
-    short_name, show, staff_kind, updated_at, works,
+    edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, works,
 )
 from db import ROLES, Database, Request, Student, parse_roster
 from ranking import WANT
@@ -28,6 +29,7 @@ MAX_TEXT = 3800  # с запасом до лимита Telegram в 4096 симв
 class AdminForm(StatesGroup):
     name = State()
     roster = State()
+    subgroup_list = State()
     broadcast = State()
     subject_name = State()
     subject_total = State()
@@ -132,11 +134,20 @@ def request_text(r: Request, full_name: str = "") -> str:
 async def notify_reviewers(bot: Bot, db: Database, request: Request, full_name: str) -> None:
     """Новая заявка — старостам и всем админам."""
     reviewers = sorted(config.ADMIN_IDS | set(await db.staff_chats()))
-    await send_many(
-        bot, reviewers,
-        f"📨 <b>Новая заявка</b>\n\nTelegram {request_text(request, full_name)}\nЭто правда этот человек?",
-        kb([btn("✅ Принять", f"rq:ok:{request.chat_id}"), btn("❌ Отклонить", f"rq:no:{request.chat_id}")]),
-    )
+    text = f"📨 <b>Новая заявка</b>\n\nTelegram {request_text(request, full_name)}\nЭто правда этот человек?"
+    markup = kb([btn("✅ Принять", f"rq:ok:{request.chat_id}"), btn("❌ Отклонить", f"rq:no:{request.chat_id}")])
+    for reviewer in reviewers:
+        # Запоминаем сообщения: когда заявку рассмотрит кто-то один, у остальных кнопки исчезнут.
+        if msg := await send(bot, reviewer, text, markup):
+            await db.add_notice(request.chat_id, reviewer, msg.message_id)
+        await asyncio.sleep(0.05)
+
+
+async def close_notices(bot: Bot, db: Database, applicant: int, text: str) -> None:
+    """Меняет у всех проверяющих сообщение о заявке на итог и убирает кнопки."""
+    for reviewer, message_id in await db.pop_notices(applicant):
+        await edit_sent(bot, reviewer, message_id, text)
+        await asyncio.sleep(0.05)
 
 
 async def show_requests(target: CallbackQuery, db: Database, ack: bool = True):
@@ -190,10 +201,11 @@ async def cb_review(cb: CallbackQuery, db: Database):
                    kb([btn("📝 Выбрать заново", "reg")]))
         await cb.answer("Отклонена")
         result = f"❌ отклонена ({esc(staff.signature)})"
+    title = request_text(request) if request else "—"
+    await close_notices(cb.bot, db, chat_id, f"📨 <b>Заявка</b>\n\n{title}\n\n{result}")
     if from_list:
         await show_requests(cb, db, ack=False)
     else:
-        title = request_text(request) if request else "—"
         await show(cb, f"📨 <b>Заявка</b>\n\n{title}\n\n{result}", ack=False)
 
 
@@ -213,7 +225,8 @@ async def show_people(target: Message | CallbackQuery, db: Database, staff: Staf
     buttons = [btn(f"{person_icon(s)} {short_name(s.name)}", f"au:{s.id}") for s in students]
     extra = []
     if staff.admin:
-        extra.append([btn("➕ Добавить людей", "apa"), btn("🗂 Убранные", "api")])
+        extra.append([btn("➕ Добавить людей", "apa"), btn("🔢 Подгруппы", "apg")])
+        extra.append([btn("🗂 Убранные", "api")])
     text = (
         f"👥 <b>Группа</b> — {len(students)} чел., в боте {in_bot}.\n"
         "🛠 админ · ⭐ староста · 📱 в боте · ▫️ ещё не зашёл в бота.\nНажми на человека, чтобы открыть карточку."
@@ -292,7 +305,8 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
     else:
         tg = "ещё не зашёл в бота"
     role = role_title(s)
-    text = f"👤 <b>{esc(s.name)}</b>\n{tg}\nРоль: {role}" + ("" if s.active else "\n🗂 <b>убран из группы</b>")
+    text = (f"👤 <b>{esc(s.name)}</b>\n{tg}\nПодгруппа: <b>{s.subgroup or '—'}</b>\nРоль: {role}"
+            + ("" if s.active else "\n🗂 <b>убран из группы</b>"))
     progress = []
     if s.active:
         text += "\n\n<b>Сдано</b> — нажми на предмет, чтобы поправить:"
@@ -300,7 +314,9 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
             _, row = await db.get_row(subj.id, s.id)
             progress.append(btn(f"{subj.name}: {row.done}/{subj.total}{f' {WANT}' if row.wants else ''}",
                                 f"aqe:{subj.id}:{s.id}:p"))
-    rows = [*rows_of(progress), [btn("✏️ Исправить ФИО", f"aun:{s.id}")]]
+    subgroups = [btn(("✓ " if s.subgroup == n else "") + t, f"aus:{s.id}:{n}")
+                 for n, t in ((1, "1 подгр."), (2, "2 подгр."), (0, "без подгр."))]
+    rows = [*rows_of(progress), subgroups, [btn("✏️ Исправить ФИО", f"aun:{s.id}")]]
     if staff.admin:
         if s.active and not is_owner(s.chat_id or 0):
             rows.append([
@@ -364,6 +380,66 @@ def role_title(s: Student) -> str:
         return "главный админ 🛠 (из настроек сервера)"
     title = {"admin": "админ 🛠", "starosta": "староста ⭐"}.get(s.role, "студент")
     return title if s.linked or s.role == "user" else f"{title} — получит, когда выберет себя в боте"
+
+
+@router.callback_query(F.data.regexp(r"^aus:\d+:[012]$"))
+async def cb_person_subgroup(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db)):
+        return
+    _, student_id, subgroup = cb.data.split(":")
+    if not (s := await load_student(cb, db, int(student_id))):
+        return
+    if s.subgroup != int(subgroup):
+        await db.set_subgroup(s.id, int(subgroup))
+        await journal_add(db, staff, f"подгруппа {s.name}: {s.subgroup or '—'} → {int(subgroup) or '—'}")
+        await notify(cb.bot, s, f"🔢 Твоя подгруппа: <b>{int(subgroup) or '—'}</b> ({esc(staff.signature)}).")
+    await cb.answer("Готово")
+    await show_person(cb, db, staff, await db.get_student(s.id), ack=False)
+
+
+# --- подгруппы списком (только админ) ---
+@router.callback_query(F.data == "apg")
+async def cb_subgroups(cb: CallbackQuery, state: FSMContext, db: Database):
+    await state.clear()
+    if not await need_staff(cb, db, admin_only=True):
+        return
+    students = await db.students()
+    counts = {n: sum(s.subgroup == n for s in students) for n in (1, 2, 0)}
+    await show(
+        cb,
+        f"🔢 <b>Подгруппы</b>\n\n1 подгруппа: {counts[1]} чел.\n2 подгруппа: {counts[2]} чел.\nНе указана: {counts[0]} чел.\n\n"
+        "Подгруппа — это фильтр в очереди («Все / 1 подгр. / 2 подгр.»), очередь при этом одна. "
+        "Вставь список подгруппы — одним сообщением, ФИО по строке. Поменять одному человеку — в его карточке.",
+        kb([btn("📥 Список 1 подгруппы", "apgl:1"), btn("📥 Список 2 подгруппы", "apgl:2")], [btn("⬅️ К группе", "ap")]),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^apgl:[12]$"))
+async def cb_subgroups_paste(cb: CallbackQuery, state: FSMContext, db: Database):
+    if await need_staff(cb, db, admin_only=True):
+        await state.set_state(AdminForm.subgroup_list)
+        await state.update_data(subgroup=int(cb.data[-1]))
+        await show(cb, f"Вставь список <b>{cb.data[-1]} подгруппы</b> — по одному ФИО на строку (номера можно оставить).",
+                   kb([btn("⬅️ Отмена", "apg")]))
+
+
+@router.message(AdminForm.subgroup_list, F.text, ~F.text.startswith("/"))
+async def admin_subgroup_list(msg: Message, state: FSMContext, db: Database):
+    if not (staff := await need_staff(msg, db, admin_only=True)):
+        await state.clear()
+        return
+    subgroup = (await state.get_data()).get("subgroup", 1)
+    names = parse_roster(msg.text)
+    if not names:
+        await msg.answer("⚠️ Не нашёл ни одного ФИО. Нужно по одному на строку.")
+        return
+    await state.clear()
+    found, missing = await db.set_subgroups(names, subgroup)
+    await journal_add(db, staff, f"{subgroup} подгруппа: отмечено {len(found)}")
+    text = f"✅ {subgroup} подгруппа: отмечено {len(found)}"
+    if missing:
+        text += "\n⚠️ Нет в списке группы:\n" + "\n".join(f"• {esc(n)}" for n in missing[:15])
+    await msg.answer(text, reply_markup=kb([btn("🔢 К подгруппам", "apg")], [btn("👥 К группе", "ap")]))
 
 
 @router.callback_query(F.data.regexp(r"^aur:\d+:(user|starosta|admin)$"))
@@ -466,12 +542,24 @@ async def show_subject_queue(cb: CallbackQuery, db: Database, subject_id: int, a
         await cb.answer("Предмета больше нет", show_alert=True)
         return
     rows = await db.queue(subject.id)
-    buttons = [btn(f"{i}. {short_name(r.name)}", f"aqe:{subject.id}:{r.student_id}") for i, r in enumerate(rows, 1)]
+    view = subgroup_view(cb.from_user.id)
+    shown = [r for r in rows if not view or r.subgroup == view]
+    buttons = [btn(f"{i}. {short_name(r.name)}", f"aqe:{subject.id}:{r.student_id}") for i, r in enumerate(shown, 1)]
+    filters = subgroup_buttons(rows, view, f"aqf:{subject.id}")
     await show(
-        cb, f"{queue_text(subject, rows)}\n<i>Нажми на человека, чтобы поправить его сданные.</i>{updated_at()}",
-        kb(*rows_of(buttons), [btn("🔄 Обновить", f"aqr:{subject.id}")], [btn("⬅️ К предметам", "aq"), ADMIN_BTN]),
+        cb, f"{queue_text(subject, rows, subgroup=view)}\n<i>Нажми на человека, чтобы поправить его сданные.</i>{updated_at()}",
+        kb(*rows_of(buttons), *([filters] if filters else []), [btn("🔄 Обновить", f"aqr:{subject.id}")],
+           [btn("⬅️ К предметам", "aq"), ADMIN_BTN]),
         ack,
     )
+
+
+@router.callback_query(F.data.regexp(r"^aqf:\d+:[012]$"))
+async def cb_subject_queue_filter(cb: CallbackQuery, db: Database):
+    if await need_staff(cb, db):
+        _, subject_id, subgroup = cb.data.split(":")
+        set_subgroup_view(cb.from_user.id, int(subgroup))
+        await show_subject_queue(cb, db, int(subject_id))
 
 
 @router.callback_query(F.data.regexp(r"^aqr:\d+$"))

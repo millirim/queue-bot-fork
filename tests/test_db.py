@@ -231,3 +231,38 @@ def test_data_survives_reconnect(tmp_path):
         assert [s.name for s in await db.students()] == ["Иванов Иван"]
         await db.close()
     run(go())
+
+
+def test_subgroups_and_migration_keep_data(tmp_path):
+    # База как на сервере до подгрупп: в students нет колонки subgroup.
+    conn = sqlite3.connect(tmp_path / "queue.db")
+    conn.executescript(
+        "CREATE TABLE students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, "
+        "active INTEGER NOT NULL DEFAULT 1, chat_id INTEGER UNIQUE, username TEXT, role TEXT NOT NULL DEFAULT 'user');"
+        "INSERT INTO students (name, chat_id, role) VALUES ('Иванов Иван', 5, 'starosta'), ('Петров Пётр', NULL, 'user');"
+        "PRAGMA user_version = 4;"
+    )
+    conn.close()
+
+    async def go():
+        db = await make_db(tmp_path)
+        assert (await db.student_by_chat(5)).starosta  # данные на месте
+        found, missing = await db.set_subgroups(["иванов иван", "Сидоров Сидор"], 2)
+        assert found == ["Иванов Иван"] and missing == ["Сидоров Сидор"]
+        bd = await subject_id(db, "БД")
+        assert {r.name: r.subgroup for r in await db.queue(bd)} == {"Иванов Иван": 2, "Петров Пётр": 0}
+        await db.close()
+    run(go())
+
+
+def test_request_notices(tmp_path):
+    async def go():
+        db = await make_db(tmp_path)
+        await db.add_notice(10, 900, 111)
+        await db.add_notice(10, 7, 222)
+        await db.add_notice(11, 900, 333)
+        assert sorted(await db.pop_notices(10)) == [(7, 222), (900, 111)]
+        assert await db.pop_notices(10) == []
+        assert await db.pop_notices(11) == [(900, 333)]
+        await db.close()
+    run(go())
