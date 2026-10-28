@@ -285,13 +285,13 @@ async def cb_review(cb: CallbackQuery, db: Database):
 
 
 # ================= люди =================
-ROLE_ICONS = {"admin": "❇️", "starosta": "✳️"}
+ROLE_ICONS = {"admin": "♒️", "starosta": "✴️"}
 
 
 def person_icon(s: Student) -> str:
-    """❎ не зарегистрирован · ✅ студент · ✳️ староста · ❇️ админ."""
+    """❌ не зарегистрирован · ✅ студент · ✴️ староста · ♒️ админ."""
     if not s.linked:
-        return "❎" + ROLE_ICONS.get(s.role, "")  # роль, назначенная заранее, включится после регистрации
+        return "❌" + ROLE_ICONS.get(s.role, "")  # роль, назначенная заранее, включится после регистрации
     if is_owner(s.chat_id):
         return ROLE_ICONS["admin"]
     return ROLE_ICONS.get(s.role, "✅")
@@ -307,7 +307,7 @@ async def show_people(target: Message | CallbackQuery, db: Database, staff: Staf
         extra.append([btn("🗂 Убранные", "api")])
     text = (
         f"👥 <b>Группа</b> — {len(students)} чел., в боте {in_bot}.\n"
-        "✅ студент · ✳️ староста · ❇️ админ · ❎ не зарегистрирован (❎✳️ — роль назначена заранее).\n"
+        "✅ студент · ✴️ староста · ♒️ админ · ❌ не зарегистрирован (❌✴️ — роль назначена заранее).\n"
         "Нажми на человека, чтобы открыть карточку."
     )
     if not students:
@@ -443,7 +443,7 @@ async def admin_name(msg: Message, state: FSMContext, db: Database):
     await show_person(msg, db, staff, await db.get_student(s.id))
 
 
-ROLE_BUTTONS = {"user": "✅ Студент", "starosta": "✳️ Староста", "admin": "❇️ Админ"}
+ROLE_BUTTONS = {"user": "✅ Студент", "starosta": "✴️ Староста", "admin": "♒️ Админ"}
 ROLE_NAMES = {"user": "студент", "starosta": "староста", "admin": "админ"}
 ROLE_NOTES = {
     "user": "Панель управления тебе больше недоступна.",
@@ -456,8 +456,8 @@ ROLE_NOTES = {
 
 def role_title(s: Student) -> str:
     if is_owner(s.chat_id or 0):
-        return "главный админ ❇️ (из настроек сервера)"
-    title = {"admin": "админ ❇️", "starosta": "староста ✳️"}.get(s.role, "студент ✅")
+        return "главный админ ♒️ (из настроек сервера)"
+    title = {"admin": "админ ♒️", "starosta": "староста ✴️"}.get(s.role, "студент ✅")
     return title if s.linked or s.role == "user" else f"{title} — получит, когда зарегистрируется"
 
 
