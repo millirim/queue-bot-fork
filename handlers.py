@@ -1,10 +1,11 @@
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import config
-from admin import close_notices, notify_reviewers
+from admin import close_notices, notify_minus, notify_reviewers
 from common import (
     btn, esc, is_owner, is_staff, kb, queue_text, refresh_wait, rows_of, set_commands, set_subgroup_view, show,
     subgroup_buttons, subgroup_view, updated_at,
@@ -13,6 +14,10 @@ from db import Database, Student
 from ranking import RULES, WANT
 
 router = Router()
+
+
+class MinusForm(StatesGroup):
+    reason = State()
 
 # ================= вспомогательное =================
 MENU_BTN = btn("🔙 В главное меню", "menu")
@@ -32,8 +37,8 @@ HELP = (
     "По каждому предмету есть <b>живая очередь</b> — в ней всегда вся группа. "
     "Открываешь её прямо на паре и смотришь, кто следующий.\n\n"
     f"{RULES}\n\n"
-    "Сколько у тебя сдано, отмечаешь сам — честно. Ошибся — кнопка «−1». "
-    "Староста тоже может поправить.\n\n"
+    "Сколько у тебя сдано, отмечаешь сам — честно. Уменьшить — только через старосту: "
+    "иначе можно было бы «−1» и пролезть вперёд.\n\n"
     "<b>Команды</b>\n"
     "/start — главное меню\n"
     "/my — мои сданные\n"
@@ -210,8 +215,10 @@ async def show_queue(target: Message | CallbackQuery, db: Database, student: Stu
         row = []
         if me.done < subject.total:
             row.append(btn("✅ Сдал (+1)", f"sd:{subject.id}:1"))
-        if me.done > 0:
-            row.append(btn("−1", f"sd:{subject.id}:-1"))
+        if until := await db.undo_until(student.id, subject.id):
+            row.append(btn(f"↩️ Отменить «Сдал» (до {until:%H:%M:%S})", f"su:{subject.id}"))
+        elif me.done > 0:
+            row.append(btn("🙏 Попросить −1", f"sm:{subject.id}"))
         if row:
             buttons.append(row)
     view = subgroup_view(target.from_user.id)
@@ -268,12 +275,70 @@ async def cb_done(cb: CallbackQuery, db: Database):
     if not (student := await require_student(cb, db)):
         return
     _, subject_id, delta = cb.data.split(":")
-    done = await db.change_done(student.id, int(subject_id), int(delta))
-    if done is None:
+    if delta != "1":  # старая кнопка «−1» из прошлой версии
+        await cb.answer("Теперь «−1» — через заявку старосте: кнопка «🙏 Попросить −1»", show_alert=True)
+    elif (done := await db.mark_done(student.id, int(subject_id))) is None:
         await cb.answer("Менять некуда", show_alert=True)
     else:
-        await cb.answer(f"Сдано: {done}" + (" 🎉" if int(delta) > 0 else ""))
+        await cb.answer(f"Сдано: {done} 🎉 Ошибся — «Отменить» в течение минуты")
     await show_queue(cb, db, student, int(subject_id), ack=False)
+
+
+@router.callback_query(F.data.regexp(r"^su:\d+$"))
+async def cb_undo(cb: CallbackQuery, db: Database):
+    """Отмена своего «Сдал» в течение минуты: всё как было, жребий тот же."""
+    if not (student := await require_student(cb, db)):
+        return
+    subject_id = int(cb.data[3:])
+    if (done := await db.undo_done(student.id, subject_id)) is None:
+        await cb.answer("Минута прошла — теперь только через «🙏 Попросить −1»", show_alert=True)
+    else:
+        await cb.answer(f"Отменено, сдано: {done}")
+    await show_queue(cb, db, student, subject_id, ack=False)
+
+
+@router.callback_query(F.data.regexp(r"^sm:\d+$"))
+async def cb_ask_minus(cb: CallbackQuery, state: FSMContext, db: Database):
+    if not (student := await require_student(cb, db)):
+        return
+    subject = await db.get_subject(int(cb.data[3:]))
+    found = subject and await db.get_row(subject.id, student.id)
+    if not found or found[1].done == 0:
+        await cb.answer("Уменьшать нечего", show_alert=True)
+        return
+    await state.set_state(MinusForm.reason)
+    await state.update_data(subject_id=subject.id)
+    await show(
+        cb,
+        f"🙏 <b>Попросить −1</b> по {esc(subject.name)}: сейчас {found[1].done}/{subject.total}\n\n"
+        "Напиши одним сообщением, почему (например, «нажал Сдал, а препод не засчитал»). "
+        "Заявку посмотрит староста или админ.",
+        kb([btn("⬅️ Отмена", f"s:{subject.id}")]),
+    )
+
+
+@router.message(MinusForm.reason, F.text, ~F.text.startswith("/"))
+async def minus_reason(msg: Message, state: FSMContext, db: Database):
+    if not (student := await require_student(msg, db)):
+        await state.clear()
+        return
+    reason = " ".join(msg.text.split())
+    if not 3 <= len(reason) <= 300:
+        await msg.answer("⚠️ Напиши причину — от 3 до 300 символов.")
+        return
+    subject = await db.get_subject((await state.get_data()).get("subject_id", 0))
+    await state.clear()
+    if subject is None:
+        await msg.answer("Этого предмета больше нет.")
+        return
+    request_id, replaced = await db.create_minus(student.id, subject.id, reason)
+    if replaced:
+        await close_notices(msg.bot, db, replaced, "🙏 <b>Заявка на −1</b>\n\n↩️ Заменена новой заявкой", kind="minus")
+    await notify_minus(msg.bot, db, await db.get_minus(request_id))
+    await msg.answer(
+        f"📨 Заявка на −1 по <b>{esc(subject.name)}</b> отправлена. Я напишу, когда её рассмотрят.",
+        reply_markup=kb([btn("📋 К очереди", f"s:{subject.id}")]),
+    )
 
 
 # ================= мои сданные =================
