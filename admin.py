@@ -1,28 +1,35 @@
-"""Админка в боте (/admin). Староста: заявки, ФИО, правка сданных, рассылка, журнал.
-Админ — ещё список группы, роли (студент/староста/админ), отвязка аккаунтов и предметы.
+"""Панель Админа (/admin) и панель старосты (/moderator). Староста: заявки, ФИО, правка сданных, рассылка,
+журнал действий. Админ — ещё список группы, роли (студент/староста/админ), отвязка аккаунтов, предметы,
+серверные логи и копия базы.
 Главные админы (ADMIN_IDS в настройках сервера) — как админы, но их нельзя снять из бота.
 Каждое действие пишется в журнал, а тому, кого оно касается, приходит уведомление."""
 import asyncio
+import logging
+import textwrap
 from dataclasses import dataclass
+from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 import config
 from common import (
-    btn, check_name, esc, is_admin, is_owner, kb, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
+    btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, works,
 )
-from db import ROLES, Database, MinusRequest, Request, Student, parse_roster
+import logsink
+from db import ROLES, AuditRecord, Database, MinusRequest, Request, ServerLog, Student, parse_roster
 from ranking import WANT
+
+log = logging.getLogger(__name__)
 
 router = Router()
 
 MENU_BTN = btn("🔙 В главное меню", "menu")
-ADMIN_BTN = btn("🛠 Админка", "adm")
+ADMIN_BTN = btn("🛠 Панель", "adm")
 MAX_TEXT = 3800  # с запасом до лимита Telegram в 4096 символов
 
 
@@ -32,6 +39,7 @@ class AdminForm(StatesGroup):
     subgroup_list = State()
     broadcast = State()
     subject_name = State()
+    subject_emoji = State()
     subject_total = State()
 
 
@@ -87,12 +95,13 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
         [btn("📢 Рассылка", "ab"), btn("📜 Журнал", "aj")],
     ]
     if staff.admin:
-        rows.append([btn("📚 Предметы", "as")])
+        rows.append([btn("📚 Предметы", "as"), btn("💾 Копия базы", "abk")])
     rows.append([MENU_BTN])
     who = "админ" if staff.admin else "староста"
     await show(
         target,
-        f"🛠 <b>Админка</b>\n\nТы — <b>{who}</b>.\nВсе действия попадают в журнал, а человеку приходит уведомление.",
+        f"🛠 <b>{panel_name('admin' if staff.admin else 'moderator')}</b>\n\nТы — <b>{who}</b>.\n"
+        "Все действия попадают в журнал, а человеку приходит уведомление.",
         kb(*rows),
     )
 
@@ -124,6 +133,12 @@ async def cb_admin(cb: CallbackQuery, state: FSMContext, db: Database):
 
 
 # ================= заявки =================
+def request_plain(r: Request) -> str:
+    """Заявка чистым текстом — для журнала (в нём нет разметки Telegram)."""
+    who = f"@{r.username}" if r.username else f"ID {r.chat_id}"
+    return f"{who} → {r.student.name}"
+
+
 def request_text(r: Request, full_name: str = "") -> str:
     who = f"@{esc(r.username)}" if r.username else (esc(full_name) or f"ID {r.chat_id}")
     role = {"admin": "\n⚠️ <b>У этого ФИО роль админа</b> — принимай, только если уверен, что это он",
@@ -247,7 +262,7 @@ async def cb_review(cb: CallbackQuery, db: Database):
                        kb([btn("📝 Выбрать заново", "reg")]))
             result = "❌ имя уже занято"
         else:
-            await journal_add(db, staff, f"заявка принята: {request_text(request)}")
+            await journal_add(db, staff, f"заявка принята: {request_plain(request)}")
             note = f"\n\nТвоя роль — <b>{ROLE_NAMES[student.role]}</b>. {ROLE_NOTES[student.role]}" if student.role != "user" else ""
             await send(cb.bot, chat_id, f"✅ <b>Заявку приняли!</b> Ты — {esc(student.name)}.{note}\n/help — как всё устроено.",
                        kb([btn("📋 Открыть меню", "menu")]))
@@ -256,7 +271,7 @@ async def cb_review(cb: CallbackQuery, db: Database):
             result = f"✅ принята ({esc(staff.signature)})"
     else:
         await db.reject(chat_id)
-        await journal_add(db, staff, f"заявка отклонена: {request_text(request)}")
+        await journal_add(db, staff, f"заявка отклонена: {request_plain(request)}")
         await send(cb.bot, chat_id, "❌ Заявку отклонили. Если это ошибка — напиши старосте и выбери себя заново.",
                    kb([btn("📝 Выбрать заново", "reg")]))
         await cb.answer("Отклонена")
@@ -270,13 +285,16 @@ async def cb_review(cb: CallbackQuery, db: Database):
 
 
 # ================= люди =================
+ROLE_ICONS = {"admin": "❇️", "starosta": "✳️"}
+
+
 def person_icon(s: Student) -> str:
-    if is_owner(s.chat_id or 0):
-        return "🛠"
-    role = {"admin": "🛠", "starosta": "⭐"}.get(s.role, "")
+    """❎ не зарегистрирован · ✅ студент · ✳️ староста · ❇️ админ."""
     if not s.linked:
-        return f"▫️{role}"  # роль назначена заранее — получит, когда выберет себя в боте
-    return role or "📱"
+        return "❎" + ROLE_ICONS.get(s.role, "")  # роль, назначенная заранее, включится после регистрации
+    if is_owner(s.chat_id):
+        return ROLE_ICONS["admin"]
+    return ROLE_ICONS.get(s.role, "✅")
 
 
 async def show_people(target: Message | CallbackQuery, db: Database, staff: Staff, ack: bool = True):
@@ -289,7 +307,8 @@ async def show_people(target: Message | CallbackQuery, db: Database, staff: Staf
         extra.append([btn("🗂 Убранные", "api")])
     text = (
         f"👥 <b>Группа</b> — {len(students)} чел., в боте {in_bot}.\n"
-        "🛠 админ · ⭐ староста · 📱 в боте · ▫️ ещё не зашёл в бота.\nНажми на человека, чтобы открыть карточку."
+        "✅ студент · ✳️ староста · ❇️ админ · ❎ не зарегистрирован (❎✳️ — роль назначена заранее).\n"
+        "Нажми на человека, чтобы открыть карточку."
     )
     if not students:
         text = "👥 Список группы пуст. Нажми «Добавить людей» и вставь список."
@@ -372,7 +391,7 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
         text += "\n\n<b>Сдано</b> — нажми на предмет, чтобы поправить:"
         for subj in await db.subjects():
             _, row = await db.get_row(subj.id, s.id)
-            progress.append(btn(f"{subj.name}: {row.done}/{subj.total}{f' {WANT}' if row.wants else ''}",
+            progress.append(btn(f"{subj.title}: {row.done}/{subj.total}{f' {WANT}' if row.wants else ''}",
                                 f"aqe:{subj.id}:{s.id}:p"))
     subgroups = [btn(("✓ " if s.subgroup == n else "") + t, f"aus:{s.id}:{n}")
                  for n, t in ((1, "1 подгр."), (2, "2 подгр."), (0, "без подгр."))]
@@ -424,22 +443,22 @@ async def admin_name(msg: Message, state: FSMContext, db: Database):
     await show_person(msg, db, staff, await db.get_student(s.id))
 
 
-ROLE_BUTTONS = {"user": "🎓 Студент", "starosta": "⭐ Староста", "admin": "🛠 Админ"}
+ROLE_BUTTONS = {"user": "✅ Студент", "starosta": "✳️ Староста", "admin": "❇️ Админ"}
 ROLE_NAMES = {"user": "студент", "starosta": "староста", "admin": "админ"}
 ROLE_NOTES = {
-    "user": "Админка тебе больше недоступна.",
-    "starosta": "Тебе будут приходить заявки, а в меню есть кнопка «🛠 Админка» (или команда /moderator): "
+    "user": "Панель управления тебе больше недоступна.",
+    "starosta": "Тебе будут приходить заявки, а в меню есть кнопка «🛠 Панель старосты» (или команда /moderator): "
                 "заявки, ФИО, сданные, рассылка, журнал.",
-    "admin": "В админке тебе доступно всё: список группы, роли, предметы. Кнопка «🛠 Админка» "
+    "admin": "В Панели Админа тебе доступно всё: список группы, роли, предметы, журнал и копия базы. Кнопка «🛠 Панель Админа» "
              "в меню или команда /admin.",
 }
 
 
 def role_title(s: Student) -> str:
     if is_owner(s.chat_id or 0):
-        return "главный админ 🛠 (из настроек сервера)"
-    title = {"admin": "админ 🛠", "starosta": "староста ⭐"}.get(s.role, "студент")
-    return title if s.linked or s.role == "user" else f"{title} — получит, когда выберет себя в боте"
+        return "главный админ ❇️ (из настроек сервера)"
+    title = {"admin": "админ ❇️", "starosta": "староста ✳️"}.get(s.role, "студент ✅")
+    return title if s.linked or s.role == "user" else f"{title} — получит, когда зарегистрируется"
 
 
 @router.callback_query(F.data.regexp(r"^aus:\d+:[012]$"))
@@ -592,7 +611,7 @@ async def cb_progress(cb: CallbackQuery, state: FSMContext, db: Database):
     await show(
         cb, "📋 <b>Сданные</b>\n\nВыбери предмет — там можно поправить, сколько кто сдал, и поставить или снять "
             f"{WANT} (например, за того, кого нет в боте).",
-        kb(*rows_of([btn(s.name, f"aqs:{s.id}") for s in subjects]), [ADMIN_BTN]),
+        kb(*rows_of([btn(s.title, f"aqs:{s.id}") for s in subjects]), [ADMIN_BTN]),
     )
 
 
@@ -658,7 +677,7 @@ async def show_progress_card(
         [back, ADMIN_BTN],
     ]
     await show(
-        cb, f"<b>{esc(subject.name)}</b>\n\n{esc(row.name)}: сдано <b>{row.done}/{subject.total}</b>, место {place}{want}",
+        cb, f"<b>{esc(subject.title)}</b>\n\n{esc(row.name)}: сдано <b>{row.done}/{subject.total}</b>, место {place}{want}",
         kb(*rows), ack,
     )
 
@@ -758,30 +777,144 @@ async def cb_broadcast_send(cb: CallbackQuery, state: FSMContext, db: Database):
 
 
 # ================= журнал =================
+# Вкладки: a — действия старост и админов, s — события сервера, e — предупреждения и ошибки, x — вообще всё.
+JOURNAL_TABS = {"a": "📜 Действия", "s": "🖥 Сервер", "e": "⚠️ Ошибки", "x": "🗒 Всё"}
+SERVER_MODES = {"s": "events", "e": "errors", "x": "all"}
+JOURNAL_PAGE = 12      # записей на странице
+JOURNAL_WIDTH = 58     # символов в строке: в коде Telegram строки не переносятся, а экран узкий
+LEVELS = {"DEBUG": "DEBUG", "INFO": "INFO ", "WARNING": "WARN ", "ERROR": "ERROR", "CRITICAL": "CRIT "}
+ROLE_SHORT = {"админ": "адм", "староста": "стар"}
+
+
+def wrapped(prefix: str, text: str, max_lines: int = 3) -> list[str]:
+    """Текст в столбик: первая строка с prefix, продолжение с таким же отступом; лишнее — многоточием."""
+    indent = " " * len(prefix)
+    lines = textwrap.wrap(" ".join(text.split()) or "—", max(20, JOURNAL_WIDTH - len(prefix)), break_long_words=True)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1][: -1] + "…"
+    return [prefix + lines[0]] + [indent + line for line in lines[1:]]
+
+
+def audit_lines(r: AuditRecord) -> list[str]:
+    """Время и автор — строкой, само действие под ним на всю ширину."""
+    role, _, name = r.actor_name.partition(" ")
+    who = f"{ROLE_SHORT.get(role, role)} {short_name(name)}" if name else r.actor_name
+    return [f"{r.at:%H:%M:%S} {who}"] + wrapped("  ", r.text, max_lines=4)
+
+
+def server_lines(r: ServerLog) -> list[str]:
+    source = "" if r.logger in ("queue-bot", "__main__") else f"[{r.logger.split('.')[0]}] "
+    lines = wrapped(f"{r.at:%H:%M:%S} {LEVELS.get(r.level, r.level[:5]):<5} ", source + r.message)
+    if r.trace:  # у ошибок — последняя строка traceback, остальное в «Последняя ошибка»
+        lines += wrapped(" " * 15 + "↳ ", r.trace.strip().splitlines()[-1], max_lines=2)
+    return lines
+
+
+def journal_text(title: str, entries: list[tuple[datetime, list[str]]], page: int) -> str:
+    """Записи в блоке кода, с разделителями по датам; entries — [(время, строки)] от новых к старым."""
+    body, day = [], None
+    for at, lines in entries:
+        if at.date() != day:
+            day = at.date()
+            body.append(f"── {day:%d.%m.%Y} ──")
+        body += lines
+    page_note = f" · стр. {page + 1}" if page else ""
+    return f"{title}{page_note}\n<pre>{esc(chr(10).join(body)) if body else 'Пока пусто.'}</pre>"
+
+
+async def show_journal(cb: CallbackQuery, db: Database, staff: Staff, tab: str, page: int, ack: bool = True):
+    if tab != "a" and not staff.admin:
+        tab = "a"
+    offset = page * JOURNAL_PAGE
+    if tab == "a":
+        records, more = await db.journal_page(offset, JOURNAL_PAGE)
+        entries = [(r.at, audit_lines(r)) for r in records]
+    else:
+        await logsink.flush(db)  # самые свежие строки ещё могут лежать в очереди на запись
+        logs, more = await db.server_logs(SERVER_MODES[tab], offset, JOURNAL_PAGE)
+        entries = [(r.at, server_lines(r)) for r in logs]
+    text = journal_text(f"📜 <b>Журнал · {JOURNAL_TABS[tab][2:].strip()}</b>", entries, page)
+    rows = []
+    if staff.admin:
+        rows.append([btn(("• " if t == tab else "") + name, f"ajl:{t}:0") for t, name in JOURNAL_TABS.items()])
+    nav = []
+    if page:
+        nav.append(btn("⬅️ Новее", f"ajl:{tab}:{page - 1}"))
+    nav.append(btn("🔄", f"ajr:{tab}:{page}"))
+    if more:
+        nav.append(btn("Старее ➡️", f"ajl:{tab}:{page + 1}"))
+    rows.append(nav)
+    if staff.admin and tab != "a":
+        rows.append([btn("🔎 Последняя ошибка целиком", "ajt")])
+    rows.append([ADMIN_BTN])
+    await show(cb, text, kb(*rows), ack)
+
+
 @router.callback_query(F.data == "aj")
 async def cb_journal(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
-    if not await need_staff(cb, db):
+    if staff := await need_staff(cb, db):
+        await show_journal(cb, db, staff, "a", 0)
+
+
+@router.callback_query(F.data.regexp(r"^ajl:[asex]:\d+$"))
+async def cb_journal_page(cb: CallbackQuery, db: Database):
+    if staff := await need_staff(cb, db):
+        _, tab, page = cb.data.split(":")
+        await show_journal(cb, db, staff, tab, int(page))
+
+
+@router.callback_query(F.data.regexp(r"^ajr:[asex]:\d+$"))
+async def cb_journal_refresh(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db)):
         return
-    text = "📜 <b>Журнал</b> — последние действия, новые сверху\n\n"
-    records = await db.journal()
-    if not records:
-        text += "Пока пусто."
-    for r in records:
-        line = f"<code>{r.at:%d.%m %H:%M}</code> {esc(r.actor_name)}: {esc(r.text)}\n"
-        if len(text) + len(line) > MAX_TEXT:
-            break
-        text += line
-    await show(cb, text, kb([btn("🔄 Обновить", "aj")], [ADMIN_BTN]))
+    if wait := refresh_wait(cb.from_user.id):
+        await cb.answer(f"Подожди {wait} с")
+        return
+    _, tab, page = cb.data.split(":")
+    await cb.answer("Обновлено")
+    await show_journal(cb, db, staff, tab, int(page), ack=False)
+
+
+@router.callback_query(F.data == "ajt")
+async def cb_journal_trace(cb: CallbackQuery, db: Database):
+    """Последняя ошибка с полным traceback."""
+    if not await need_staff(cb, db, admin_only=True):
+        return
+    await logsink.flush(db)
+    err = await db.last_error_trace()
+    if err is None:
+        await cb.answer("Ошибок с traceback пока не было", show_alert=True)
+        return
+    text = f"🔎 <b>Последняя ошибка</b> · {err.at:%d.%m.%Y %H:%M:%S}\n<pre>{esc(err.message[:300])}\n\n{esc(err.trace)}</pre>"
+    await show(cb, text[:4000], kb([btn("⬅️ К журналу", "ajl:e:0")], [ADMIN_BTN]))
+
+
+# ================= копия базы (только админ) =================
+@router.callback_query(F.data == "abk")
+async def cb_backup(cb: CallbackQuery, db: Database):
+    """Полная копия базы одним zip-файлом: bd-группа-дд-мм-гггг-ччмм.zip."""
+    if not (staff := await need_staff(cb, db, admin_only=True)):
+        return
+    await cb.answer("Готовлю копию…")
+    name, data = await db.backup_zip()
+    await cb.message.answer_document(
+        BufferedInputFile(data, filename=name),
+        caption=f"💾 Полная копия базы ({len(data) / 1024:.0f} КБ). Внутри — queue.db.\n"
+                "⚠️ В ней все ФИО, Telegram ID и сданные: храни аккуратно и не пересылай.",
+    )
+    await journal_add(db, staff, f"выгружена копия базы: {name}")
+    log.info("Копия базы выдана админу (id %s): %s, %d байт", staff.chat_id, name, len(data))
 
 
 # ================= предметы (только админ) =================
 async def show_subjects(target: Message | CallbackQuery, db: Database, ack: bool = True):
     subjects = await db.subjects()
-    text = "📚 <b>Предметы</b>\n\nНазвание и сколько всего работ. Нажми на предмет, чтобы изменить его.\n"
+    text = "📚 <b>Предметы</b>\n\nЭмодзи, название и сколько всего работ. Нажми на предмет, чтобы изменить.\n"
     if not subjects:
         text += "\nПока пусто."
-    rows = [[btn(f"{s.name} · {works(s.total)}", f"asw:{s.id}")] for s in subjects]
+    rows = [[btn(f"{s.title} · {works(s.total)}", f"asw:{s.id}")] for s in subjects]
     await show(target, text, kb(*rows, [btn("➕ Добавить предмет", "asa")], [ADMIN_BTN]), ack)
 
 
@@ -801,9 +934,10 @@ async def cb_subject_card(cb: CallbackQuery, state: FSMContext, db: Database):
         await cb.answer("Уже удалено", show_alert=True)
         return
     await show(
-        cb, f"📚 <b>{esc(s.name)}</b> · {works(s.total)}",
-        kb([btn("✏️ Переименовать", f"asn:{s.id}"), btn("🔢 Сколько работ", f"ast:{s.id}")],
-           [btn("🗑 Удалить", f"asx:{s.id}")], [btn("⬅️ К предметам", "as")]),
+        cb, f"<b>{esc(s.title)}</b> · {works(s.total)}",
+        kb([btn("✏️ Название", f"asn:{s.id}"), btn("🎨 Эмодзи", f"ase:{s.id}")],
+           [btn("🔢 Сколько работ", f"ast:{s.id}"), btn("🗑 Удалить", f"asx:{s.id}")],
+           [btn("⬅️ К предметам", "as")]),
     )
 
 
@@ -812,7 +946,7 @@ async def cb_subject_add(cb: CallbackQuery, state: FSMContext, db: Database):
     if await need_staff(cb, db, admin_only=True):
         await state.set_state(AdminForm.subject_name)
         await state.update_data(subject_id=None)
-        await show(cb, "Напиши название нового предмета (например, <i>БД</i> или <i>БЖЧ — лабы</i>).",
+        await show(cb, "Напиши название нового предмета (например, <i>БД</i> или <i>БЖЧ-ЛР</i>).",
                    kb([btn("⬅️ Отмена", "as")]))
 
 
@@ -856,7 +990,7 @@ async def cb_subject_total(cb: CallbackQuery, state: FSMContext, db: Database):
     if await need_staff(cb, db, admin_only=True) and (s := await db.get_subject(int(cb.data[4:]))):
         await state.set_state(AdminForm.subject_total)
         await state.update_data(subject_id=s.id)
-        await show(cb, f"<b>{esc(s.name)}</b>, сейчас {works(s.total)}.\n\nСколько всего работ? Напиши число.",
+        await show(cb, f"<b>{esc(s.title)}</b>, сейчас {works(s.total)}.\n\nСколько всего работ? Напиши число.",
                    kb([btn("⬅️ Отмена", f"asw:{s.id}")]))
 
 
@@ -870,21 +1004,70 @@ async def admin_subject_total(msg: Message, state: FSMContext, db: Database):
         await msg.answer("⚠️ Нужно число от 1 до 200.")
         return
     total, data = int(text), await state.get_data()
+    if data.get("subject_id") is None:  # новый предмет: осталось выбрать эмодзи
+        await state.set_state(AdminForm.subject_emoji)
+        await state.update_data(total=total)
+        await msg.answer(
+            f"<b>{esc(data['name'])}</b>, {works(total)}.\n\nПришли эмодзи для предмета (например, 💅) — "
+            "или нажми «Пропустить», будет 📚.",
+            reply_markup=kb([btn("Пропустить", "asek")], [btn("⬅️ Отмена", "as")]),
+        )
+        return
+    await state.clear()
+    if old := await db.get_subject(data["subject_id"]):
+        await db.set_subject_total(old.id, total)
+        await journal_add(db, staff, f"предмет {old.name}: работ {old.total} → {total}")
+    await show_subjects(msg, db)
+
+
+def valid_emoji(text: str) -> bool:
+    """Одно эмодзи (допускаются составные: флаги, ❤️, семьи): без букв и цифр, не длиннее 12 символов."""
+    return 1 <= len(text) <= 12 and all(ord(c) > 0x2000 for c in text)
+
+
+async def save_subject_emoji(target: Message | CallbackQuery, state: FSMContext, db: Database, staff: Staff, emoji: str):
+    data = await state.get_data()
     await state.clear()
     if data.get("subject_id") is not None:
         if old := await db.get_subject(data["subject_id"]):
-            await db.set_subject_total(old.id, total)
-            await journal_add(db, staff, f"предмет {old.name}: работ {old.total} → {total}")
-    elif await db.add_subject(data["name"], total):
-        await journal_add(db, staff, f"предмет добавлен: {data['name']} ({works(total)})")
-    await show_subjects(msg, db)
+            await db.set_subject_emoji(old.id, emoji)
+            await journal_add(db, staff, f"эмодзи предмета {old.name}: {old.emoji} → {emoji}")
+    elif data.get("name") and await db.add_subject(data["name"], data["total"], emoji):
+        await journal_add(db, staff, f"предмет добавлен: {emoji} {data['name']} ({works(data['total'])})")
+    await show_subjects(target, db, ack=False)
+
+
+@router.callback_query(F.data.regexp(r"^ase:\d+$"))
+async def cb_subject_emoji(cb: CallbackQuery, state: FSMContext, db: Database):
+    if await need_staff(cb, db, admin_only=True) and (s := await db.get_subject(int(cb.data[4:]))):
+        await state.set_state(AdminForm.subject_emoji)
+        await state.update_data(subject_id=s.id)
+        await show(cb, f"<b>{esc(s.title)}</b>\n\nПришли новое эмодзи для предмета.", kb([btn("⬅️ Отмена", f"asw:{s.id}")]))
+
+
+@router.message(AdminForm.subject_emoji, F.text, ~F.text.startswith("/"))
+async def admin_subject_emoji(msg: Message, state: FSMContext, db: Database):
+    if not (staff := await need_staff(msg, db, admin_only=True)):
+        await state.clear()
+        return
+    emoji = msg.text.strip()
+    if not valid_emoji(emoji):
+        await msg.answer("⚠️ Пришли одно эмодзи, без букв и цифр — например 💅")
+        return
+    await save_subject_emoji(msg, state, db, staff, emoji)
+
+
+@router.callback_query(AdminForm.subject_emoji, F.data == "asek")
+async def cb_subject_emoji_skip(cb: CallbackQuery, state: FSMContext, db: Database):
+    if staff := await need_staff(cb, db, admin_only=True):
+        await save_subject_emoji(cb, state, db, staff, "📚")
 
 
 @router.callback_query(F.data.regexp(r"^asx:\d+$"))
 async def cb_subject_delete(cb: CallbackQuery, db: Database):
     if await need_staff(cb, db, admin_only=True) and (s := await db.get_subject(int(cb.data[4:]))):
         await show(
-            cb, f"Удалить <b>{esc(s.name)}</b>?\n\nОчередь и все сданные по этому предмету пропадут.",
+            cb, f"Удалить <b>{esc(s.title)}</b>?\n\nОчередь и все сданные по этому предмету пропадут.",
             kb([btn("🗑 Да, удалить", f"asxok:{s.id}")], [btn("⬅️ Нет", f"asw:{s.id}")]),
         )
 

@@ -7,8 +7,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 import config
 from admin import close_notices, notify_minus, notify_reviewers
 from common import (
-    btn, esc, is_owner, is_staff, kb, queue_text, refresh_wait, rows_of, set_commands, set_subgroup_view, show,
-    subgroup_buttons, subgroup_view, updated_at,
+    btn, esc, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, set_subgroup_view,
+    show, staff_kind, subgroup_buttons, subgroup_view, updated_at,
 )
 from db import Database, Student
 from ranking import RULES, WANT
@@ -24,11 +24,11 @@ MENU_BTN = btn("🔙 В главное меню", "menu")
 
 
 async def main_menu(db: Database, chat_id: int, student: Student | None) -> InlineKeyboardMarkup:
-    """Главное меню: предметы, мои сданные; старостам и админам — админка."""
-    subjects = [btn(f"📋 {s.name}", f"s:{s.id}") for s in await db.subjects()]
-    rows = rows_of(subjects) + [[btn("📊 Мои сданные", "my"), btn("👤 Профиль", "profile")]]
+    """Главное меню: предметы и «Моё»; старостам и админам — их панель."""
+    subjects = [btn(s.title, f"s:{s.id}") for s in await db.subjects()]
+    rows = rows_of(subjects) + [[btn("👤 Моё", "my")]]
     if is_staff(chat_id, student):
-        rows.append([btn("🛠 Админка", "adm")])
+        rows.append([btn(f"🛠 {panel_name(staff_kind(chat_id, student))}", "adm")])
     return kb(*rows)
 
 
@@ -41,7 +41,7 @@ HELP = (
     "иначе можно было бы «−1» и пролезть вперёд.\n\n"
     "<b>Команды</b>\n"
     "/start — главное меню\n"
-    "/my — мои сданные\n"
+    "/my — моё: сданные и место в очереди\n"
     "/cancel — отменить текущее действие\n"
     "/help — эта подсказка"
 )
@@ -67,7 +67,7 @@ async def require_student(target: Message | CallbackQuery, db: Database) -> Stud
 # ================= регистрация: выбор себя из списка =================
 async def show_roster(target: Message | CallbackQuery, db: Database, ack: bool = True):
     free = await db.free_students()
-    admin_note = "\n\n<i>Ты админ: админка доступна по /admin и без выбора себя.</i>" if is_owner(target.from_user.id) else ""
+    admin_note = "\n\n<i>Ты админ: Панель Админа доступна по /admin и без выбора себя.</i>" if is_owner(target.from_user.id) else ""
     if not free:
         await show(
             target,
@@ -179,23 +179,6 @@ async def cb_menu(cb: CallbackQuery, state: FSMContext, db: Database):
 @router.callback_query(F.data == "help")
 async def cb_help(cb: CallbackQuery):
     await show(cb, HELP, kb([MENU_BTN]))
-
-
-# ================= профиль =================
-@router.callback_query(F.data == "profile")
-async def cb_profile(cb: CallbackQuery, state: FSMContext, db: Database):
-    await state.clear()
-    if not (student := await require_student(cb, db)):
-        return
-    role = ("главный админ" if is_owner(cb.from_user.id) else "админ 🛠" if student.admin
-            else "староста ⭐" if student.starosta else "студент")
-    await show(
-        cb,
-        f"👤 <b>Профиль</b>\n\nФИО: <b>{esc(student.name)}</b>\n"
-        f"Подгруппа: <b>{student.subgroup or '—'}</b>\nРоль: {role}\n\n"
-        "<i>Чтобы исправить ФИО — напиши старосте или админу.</i>",
-        kb([btn("ℹ️ Как это работает", "help")], [MENU_BTN]),
-    )
 
 
 # ================= очередь по предмету =================
@@ -310,7 +293,7 @@ async def cb_ask_minus(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.update_data(subject_id=subject.id)
     await show(
         cb,
-        f"🙏 <b>Попросить −1</b> по {esc(subject.name)}: сейчас {found[1].done}/{subject.total}\n\n"
+        f"🙏 <b>Попросить −1</b> по {esc(subject.title)}: сейчас {found[1].done}/{subject.total}\n\n"
         "Напиши одним сообщением, почему (например, «нажал Сдал, а препод не засчитал»). "
         "Заявку посмотрит староста или админ.",
         kb([btn("⬅️ Отмена", f"s:{subject.id}")]),
@@ -336,24 +319,46 @@ async def minus_reason(msg: Message, state: FSMContext, db: Database):
         await close_notices(msg.bot, db, replaced, "🙏 <b>Заявка на −1</b>\n\n↩️ Заменена новой заявкой", kind="minus")
     await notify_minus(msg.bot, db, await db.get_minus(request_id))
     await msg.answer(
-        f"📨 Заявка на −1 по <b>{esc(subject.name)}</b> отправлена. Я напишу, когда её рассмотрят.",
+        f"📨 Заявка на −1 по <b>{esc(subject.title)}</b> отправлена. Я напишу, когда её рассмотрят.",
         reply_markup=kb([btn("📋 К очереди", f"s:{subject.id}")]),
     )
 
 
-# ================= мои сданные =================
+# ================= моё =================
+def role_label(chat_id: int, student: Student) -> str:
+    if is_owner(chat_id):
+        return "главный админ ❇️"
+    return "админ ❇️" if student.admin else "староста ✳️" if student.starosta else "студент ✅"
+
+
 async def show_my(target: Message | CallbackQuery, db: Database, student: Student):
-    text = "📊 <b>Мои сданные</b>\n\n"
+    """«Моё»: профиль + по каждому предмету сколько сдано и своё место (общее и в подгруппе)."""
+    chat_id = target.from_user.id
+    text = (
+        f"👤 <b>Моё</b>\n\n<b>{esc(student.name)}</b>\n"
+        f"Подгруппа: <b>{student.subgroup or '—'}</b> · Роль: {role_label(chat_id, student)}\n"
+        "<i>Чтобы исправить ФИО или подгруппу — напиши старосте или админу.</i>\n\n"
+        "📊 <b>Сданные и место в очереди</b>\n"
+    )
     buttons = []
     for s in await db.subjects():
-        place, row = await db.get_row(s.id, student.id)
-        want = f" · {WANT} хочу сдать" if row.wants else ""
-        text += f"<b>{esc(s.name)}</b>: {row.done}/{s.total} · место {place}{want}\n"
-        buttons.append(btn(f"📋 {s.name}", f"s:{s.id}"))
-    await show(target, text, kb(*rows_of(buttons), [MENU_BTN]))
+        st = await db.standing(s.id, student.id)
+        if st is None:
+            continue
+        place = f"место <b>{st.place}</b> из {st.total}"
+        if st.sub_place:
+            place += f" · в {student.subgroup} подгр. <b>{st.sub_place}</b> из {st.sub_total}"
+        want = f" {WANT}" if st.row.wants else ""
+        text += f"\n{esc(s.title)}: <b>{st.row.done}/{s.total}</b>{want}\n   {place}"
+        buttons.append(btn(s.title, f"s:{s.id}"))
+    if not buttons:
+        text += "\nПредметов пока нет."
+    if not student.subgroup:
+        text += "\n\n<i>Подгруппа не указана — место в подгруппе не считается.</i>"
+    await show(target, text, kb(*rows_of(buttons), [btn("ℹ️ Как это работает", "help")], [MENU_BTN]))
 
 
-@router.callback_query(F.data == "my")
+@router.callback_query(F.data.in_({"my", "profile"}))
 async def cb_my(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
     if student := await require_student(cb, db):

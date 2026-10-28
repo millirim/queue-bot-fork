@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 import admin
 import config
 import handlers
+import logsink
 from common import BASE_COMMANDS, set_commands, staff_kind
 from db import Database
 
@@ -19,13 +20,15 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logsink.install()  # те же логи — ещё и в базу, для панели админа
     if not config.BOT_TOKEN:
         raise SystemExit("Переменная окружения BOT_TOKEN не задана (токен от @BotFather).")
     if not config.ADMIN_IDS:
-        log.warning("ADMIN_IDS не задан: заявки на регистрацию принимаются автоматически, админки нет")
+        log.warning("ADMIN_IDS не задан: заявки на регистрацию принимаются автоматически, панели админа нет")
 
     db = Database(config.DB_PATH)
     await db.connect()
+    flusher = asyncio.create_task(logsink.flusher(db))
 
     bot = Bot(
         token=config.BOT_TOKEN,
@@ -33,7 +36,7 @@ async def main() -> None:
     )
     dp = Dispatcher()
     dp["db"] = db
-    # Админка первой: в handlers последними стоят запасные обработчики, которые ловят всё подряд.
+    # Панель админа первой: в handlers последними стоят запасные обработчики, которые ловят всё подряд.
     dp.include_router(admin.router)
     dp.include_router(handlers.router)
 
@@ -51,6 +54,9 @@ async def main() -> None:
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot)
     finally:
+        log.info("Бот остановлен")
+        flusher.cancel()
+        await logsink.flush(db)  # дописать последние строки
         await bot.session.close()
         await db.close()
 
