@@ -3,10 +3,14 @@ import asyncio
 import html
 import logging
 import re
+import time
+from datetime import datetime
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand, BotCommandScopeChat, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
+)
 
 import config
 from db import Student, Subject
@@ -31,6 +35,57 @@ def is_staff(chat_id: int, student: Student | None) -> bool:
     return is_admin(chat_id, student) or bool(student and student.starosta)
 
 
+# --- команды в меню Telegram: каждый видит свои ---
+BASE_COMMANDS = [
+    BotCommand(command="start", description="Главное меню"),
+    BotCommand(command="my", description="Мои сданные"),
+    BotCommand(command="cancel", description="Отменить действие"),
+    BotCommand(command="help", description="Как работает очередь"),
+]
+STAFF_COMMANDS = {
+    "moderator": BotCommand(command="moderator", description="Панель старосты"),
+    "admin": BotCommand(command="admin", description="Админка"),
+}
+
+
+def staff_kind(chat_id: int, student: Student | None) -> str | None:
+    """'admin', 'moderator' (староста) или None (студент)."""
+    if is_admin(chat_id, student):
+        return "admin"
+    return "moderator" if student and student.starosta else None
+
+
+async def set_commands(bot: Bot, chat_id: int, kind: str | None) -> None:
+    """Команды в меню Telegram для одного человека; None — обычные, как у всех."""
+    scope = BotCommandScopeChat(chat_id=chat_id)
+    try:
+        if kind is None:
+            await bot.delete_my_commands(scope=scope)
+        else:
+            await bot.set_my_commands([*BASE_COMMANDS, STAFF_COMMANDS[kind]], scope=scope)
+    except TelegramAPIError as e:  # например, человек ещё ни разу не писал боту
+        log.info("Команды для %s не обновлены: %s", chat_id, e)
+
+
+# --- кулдаун «Обновить» ---
+REFRESH_COOLDOWN = 3.0  # секунд на человека; Telegram позволяет ~1 правку в секунду на чат
+_last_refresh: dict[int, float] = {}
+
+
+def refresh_wait(chat_id: int) -> float:
+    """Сколько ещё ждать до следующего обновления (0 — можно). Засчитывает нажатие, если можно."""
+    now = time.monotonic()
+    wait = _last_refresh.get(chat_id, 0) + REFRESH_COOLDOWN - now
+    if wait > 0:
+        return max(1, round(wait + 0.49))
+    _last_refresh[chat_id] = now
+    return 0
+
+
+def updated_at() -> str:
+    return f"\n🕐 <i>Обновлено в {datetime.now(config.TIMEZONE):%H:%M:%S}</i>"
+
+
 def check_name(text: str) -> tuple[str, str | None]:
     """Нормализованное ФИО и текст ошибки (None — всё в порядке)."""
     name = " ".join(text.split())
@@ -52,6 +107,9 @@ async def show(
     if isinstance(target, CallbackQuery):
         try:
             await target.message.edit_text(text, reply_markup=markup)
+        except TelegramRetryAfter as e:
+            await target.answer(f"Telegram просит подождать {e.retry_after} с — нажми чуть позже", show_alert=True)
+            return
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
                 raise
@@ -121,7 +179,7 @@ def queue_text(subject: Subject, rows: list[Row], me: int | None = None) -> str:
     """Живая очередь: сверху желающие сдать, ниже остальные. me — id человека из списка."""
     text = f"📋 <b>{esc(subject.name)}</b> — очередь сейчас\n"
     if not rows:
-        return text + "\nСписок группы пока пуст — админ загружает его в /admin → Люди."
+        return text + "\nСписок группы пока пуст — админ загружает его в админке → Люди."
     def section(r: Row) -> str:
         if r.wants:
             return f"{WANT} <b>Хотят сдать следующее:</b>"
