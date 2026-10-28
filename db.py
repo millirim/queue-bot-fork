@@ -347,12 +347,13 @@ class Database:
     async def queue(self, subject_id: int) -> list[Row]:
         """Вся группа по предмету в порядке очереди (ranking.order)."""
         rows = await self._all(
-            "SELECT s.id, s.name, COALESCE(p.done, 0) AS done, p.want_since, p.lot FROM students s "
+            "SELECT s.id, s.name, s.chat_id, COALESCE(p.done, 0) AS done, p.want_since, p.lot FROM students s "
             "LEFT JOIN progress p ON p.student_id = s.id AND p.subject_id = ? WHERE s.active = 1",
             (subject_id,),
         )
         return order([
-            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, r["lot"]) for r in rows
+            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, r["lot"], r["chat_id"] is not None)
+            for r in rows
         ])
 
     async def get_row(self, subject_id: int, student_id: int) -> tuple[int, Row] | None:

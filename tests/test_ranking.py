@@ -59,3 +59,13 @@ def test_order_is_complete_and_deterministic_for_same_lots():
     rows = [Row(i, f"Человек{i}", i % 3, bool(i % 2), draw_lot()) for i in range(20)]
     assert sorted(r.student_id for r in order(rows)) == list(range(20))
     assert order(rows) == order(list(reversed(rows)))  # одни и те же жребии — один и тот же список
+
+
+def test_not_in_bot_go_to_the_bottom_without_priority():
+    rows = [
+        Row(1, "Абрамов", 0, False, None, in_bot=False),   # 0 сдано, но не в боте
+        Row(2, "Борисов", 5, False, None),                 # 5 сдано, в боте
+        Row(3, "Волков", 3, True, 1, in_bot=False),        # не в боте, но староста поставил 🙋
+        Row(4, "Глебов", 0, False, None),                  # 0 сдано, в боте
+    ]
+    assert names(rows) == ["Волков", "Глебов", "Борисов", "Абрамов"]
