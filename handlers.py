@@ -5,7 +5,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import config
 from admin import notify_reviewers
-from common import btn, esc, is_admin, is_staff, kb, queue_text, rows_of, show
+from common import btn, esc, is_owner, is_staff, kb, queue_text, rows_of, show
 from db import Database, Student
 from ranking import RULES, WANT
 
@@ -59,7 +59,7 @@ async def require_student(target: Message | CallbackQuery, db: Database) -> Stud
 # ================= регистрация: выбор себя из списка =================
 async def show_roster(target: Message | CallbackQuery, db: Database, ack: bool = True):
     free = await db.free_students()
-    admin_note = "\n\n<i>Ты админ: админка доступна по /admin и без выбора себя.</i>" if is_admin(target.from_user.id) else ""
+    admin_note = "\n\n<i>Ты админ: админка доступна по /admin и без выбора себя.</i>" if is_owner(target.from_user.id) else ""
     if not free:
         await show(
             target,
@@ -115,7 +115,7 @@ async def cb_pick_confirm(cb: CallbackQuery, db: Database):
         await show_roster(cb, db, ack=False)
         return
     # Без админов принимать заявки некому — тогда сразу в бот.
-    if is_admin(chat_id) or not config.ADMIN_IDS:
+    if is_owner(chat_id) or not config.ADMIN_IDS:
         student = await db.link(chat_id, cb.from_user.username, student_id)
         await show(cb, f"✅ Готово, <b>{esc(student.name)}</b>!\n\n{HELP}", await main_menu(db, chat_id, student))
         return
@@ -175,7 +175,8 @@ async def cb_profile(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
     if not (student := await require_student(cb, db)):
         return
-    role = "админ" if is_admin(cb.from_user.id) else ("староста ⭐" if student.starosta else "студент")
+    role = ("главный админ" if is_owner(cb.from_user.id) else "админ 🛠" if student.admin
+            else "староста ⭐" if student.starosta else "студент")
     await show(
         cb,
         f"👤 <b>Профиль</b>\n\nФИО: <b>{esc(student.name)}</b>\nРоль: {role}\n\n"

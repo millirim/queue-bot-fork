@@ -16,13 +16,19 @@ log = logging.getLogger(__name__)
 
 
 # --- права ---
-def is_admin(chat_id: int) -> bool:
+def is_owner(chat_id: int) -> bool:
+    """Главный админ — из ADMIN_IDS в настройках сервера. Его нельзя снять из бота."""
     return chat_id in config.ADMIN_IDS
+
+
+def is_admin(chat_id: int, student: Student | None = None) -> bool:
+    """Главный админ или админ, назначенный в боте."""
+    return is_owner(chat_id) or bool(student and student.admin)
 
 
 def is_staff(chat_id: int, student: Student | None) -> bool:
     """Староста или админ — видит админку."""
-    return is_admin(chat_id) or bool(student and student.starosta)
+    return is_admin(chat_id, student) or bool(student and student.starosta)
 
 
 def check_name(text: str) -> tuple[str, str | None]:
@@ -116,14 +122,19 @@ def queue_text(subject: Subject, rows: list[Row], me: int | None = None) -> str:
     text = f"📋 <b>{esc(subject.name)}</b> — очередь сейчас\n"
     if not rows:
         return text + "\nСписок группы пока пуст — админ загружает его в /admin → Люди."
-    wanting = sum(r.wants for r in rows)
+    def section(r: Row) -> str:
+        if r.wants:
+            return f"{WANT} <b>Хотят сдать следующее:</b>"
+        return "<b>Остальные</b> (меньше сдано — выше):" if r.in_bot else "▫️ <b>Ещё не в боте</b> (без приоритета):"
+
+    wanting, current = sum(r.wants for r in rows), None
     for i, r in enumerate(rows, 1):
-        if i == 1 and wanting:
-            text += f"\n{WANT} <b>Хотят сдать следующее:</b>\n"
-        if i == wanting + 1:
-            text += "\n<b>Остальные</b> (меньше сдано — выше):\n" if wanting else "\n"
+        if section(r) != current:
+            current = section(r)
+            text += f"\n{current}\n"
         mark = " 👈 <i>это ты</i>" if r.student_id == me else ""
-        text += f"{i}. {esc(r.name)} — {r.done}/{subject.total}{mark}\n"
+        done = f" — {r.done}/{subject.total}" if r.in_bot or r.done else ""
+        text += f"{i}. {esc(short_name(r.name))}{done}{mark}\n"
     if not wanting:
         text += f"\n<i>Пока никто не нажал «{WANT} Хочу сдать следующее».</i>"
     return text

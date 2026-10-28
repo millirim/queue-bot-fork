@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS students (
     active   INTEGER NOT NULL DEFAULT 1,   -- 0 — убран из группы (например, отчислен)
     chat_id  INTEGER UNIQUE,               -- привязанный Telegram; NULL — ещё не в боте
     username TEXT,
-    role     TEXT NOT NULL DEFAULT 'user'  -- user / starosta
+    role     TEXT NOT NULL DEFAULT 'user'  -- user / starosta / admin
 );
 
 -- Заявки «этот аккаунт Telegram — вот этот человек из списка».
@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS audit (
 OLD_TABLES = ("payments", "queue", "lessons", "works", "users", "audit", "progress", "requests", "subjects", "students")
 
 
+ROLES = ("user", "starosta", "admin")
+
+
 @dataclass
 class Student:
     id: int
@@ -80,6 +83,11 @@ class Student:
     @property
     def starosta(self) -> bool:
         return self.active and self.linked and self.role == "starosta"
+
+    @property
+    def admin(self) -> bool:
+        """Админ, назначенный в боте (главные админы — в ADMIN_IDS, их здесь нет)."""
+        return self.active and self.linked and self.role == "admin"
 
 
 @dataclass
@@ -240,21 +248,23 @@ class Database:
         await self._write("UPDATE progress SET want_since = NULL WHERE student_id = ?", (student_id,))
 
     async def unlink(self, student_id: int) -> int | None:
-        """Отвязывает Telegram от человека (например, если выбрал не себя). Возвращает отвязанный chat_id."""
+        """Отвязывает Telegram от человека (например, если выбрал не себя). Роль остаётся за ФИО.
+        Возвращает отвязанный chat_id."""
         student = await self.get_student(student_id)
         if not student or not student.linked:
             return None
         await self._write(
-            "UPDATE students SET chat_id = NULL, username = NULL, role = 'user' WHERE id = ?", (student_id,)
+            "UPDATE students SET chat_id = NULL, username = NULL WHERE id = ?", (student_id,)
         )
         return student.chat_id
 
     async def set_role(self, student_id: int, role: str) -> None:
-        assert role in ("user", "starosta")
+        assert role in ROLES
         await self._write("UPDATE students SET role = ? WHERE id = ?", (role, student_id))
 
-    async def starostas(self) -> list[int]:
-        return [s.chat_id for s in await self.students() if s.starosta]
+    async def staff_chats(self) -> list[int]:
+        """Telegram старост и назначенных в боте админов — им приходят заявки."""
+        return [s.chat_id for s in await self.students() if s.starosta or s.admin]
 
     async def member_chats(self) -> list[int]:
         """Telegram всех из группы, кто есть в боте."""
@@ -337,12 +347,13 @@ class Database:
     async def queue(self, subject_id: int) -> list[Row]:
         """Вся группа по предмету в порядке очереди (ranking.order)."""
         rows = await self._all(
-            "SELECT s.id, s.name, COALESCE(p.done, 0) AS done, p.want_since, p.lot FROM students s "
+            "SELECT s.id, s.name, s.chat_id, COALESCE(p.done, 0) AS done, p.want_since, p.lot FROM students s "
             "LEFT JOIN progress p ON p.student_id = s.id AND p.subject_id = ? WHERE s.active = 1",
             (subject_id,),
         )
         return order([
-            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, r["lot"]) for r in rows
+            Row(r["id"], r["name"], r["done"], r["want_since"] is not None, r["lot"], r["chat_id"] is not None)
+            for r in rows
         ])
 
     async def get_row(self, subject_id: int, student_id: int) -> tuple[int, Row] | None:
