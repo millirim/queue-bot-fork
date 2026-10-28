@@ -226,7 +226,7 @@ def queue_text(subject: Subject, rows: list[Row], me: int | None = None, subgrou
     def section(r: Row) -> str:
         if r.wants:
             return f"{WANT} <b>Хотят сдать следующее:</b>"
-        return "<b>Остальные</b> (меньше сдано — выше):" if r.in_bot else "❎ <b>Ещё не в боте</b> (без приоритета):"
+        return "<b>Остальные</b> (меньше сдано — выше):" if r.in_bot else "❌ <b>Ещё не в боте</b> (без приоритета):"
 
     wanting, current = sum(r.wants for r in rows), None
     for i, r in enumerate(rows, 1):

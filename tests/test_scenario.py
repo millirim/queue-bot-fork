@@ -246,9 +246,9 @@ async def scenario(tmp_path):
 
     # ===== значки в списке людей =====
     await press(dp, 900, "ap"); lab = labels(900)
-    check(any(l.startswith("✅ ") for l in lab) and any(l.startswith("❎") for l in lab), "✅ зарегистрированные, ❎ нет")
-    check(any(l.startswith("✳️ ") for l in lab) and any(l.startswith("❇️ ") for l in lab), "✳️ старосты, ❇️ админы")
-    check("❎ не зарегистрирован" in last(900)[1], "легенда значков")
+    check(any(l.startswith("✅ ") for l in lab) and any(l.startswith("❌") for l in lab), "✅ зарегистрированные, ❌ нет")
+    check(any(l.startswith("✴️ ") for l in lab) and any(l.startswith("♒️ ") for l in lab), "✴️ старосты, ♒️ админы")
+    check("❌ не зарегистрирован" in last(900)[1], "легенда значков")
 
     # ===== предметы: эмодзи и переименование =====
     await press(dp, 900, "as")

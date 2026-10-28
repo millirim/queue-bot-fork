@@ -327,8 +327,8 @@ async def minus_reason(msg: Message, state: FSMContext, db: Database):
 # ================= моё =================
 def role_label(chat_id: int, student: Student) -> str:
     if is_owner(chat_id):
-        return "главный админ ❇️"
-    return "админ ❇️" if student.admin else "староста ✳️" if student.starosta else "студент ✅"
+        return "главный админ ♒️"
+    return "админ ♒️" if student.admin else "староста ✴️" if student.starosta else "студент ✅"
 
 
 async def show_my(target: Message | CallbackQuery, db: Database, student: Student):
