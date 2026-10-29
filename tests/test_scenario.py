@@ -237,6 +237,21 @@ async def scenario(tmp_path):
     await text(dp, 8, "/my"); m8 = last(8)[1]
     check("Подгруппа не указана" in m8 and "подгр. <b>" not in m8, "без подгруппы — без места в подгруппе")
 
+    # ===== кнопка «На главную»: красная (Bot API 9.4, style="danger") на всех экранах кроме самого меню =====
+    def home(chat):
+        m = last(chat)[2]
+        return [b for row in (m.inline_keyboard if m else []) for b in row if b.callback_data == "menu"]
+    await press(dp, 1, f"s:{bd}")
+    check(len(home(1)) == 1 and home(1)[0].text == "🏠 На главную" and home(1)[0].style == "danger", "очередь: красная «🏠 На главную»")
+    await press(dp, 1, "my"); check(len(home(1)) == 1 and home(1)[0].style == "danger", "«Моё»: красная «На главную»")
+    await press(dp, 1, "help"); check(len(home(1)) == 1, "«Как это работает»: есть «На главную»")
+    await press(dp, 900, "adm"); check(len(home(900)) == 1 and home(900)[0].style == "danger", "панель: красная «На главную»")
+    await text(dp, 1, "/start"); check(not home(1), "в самом главном меню кнопки «На главную» нет")
+    await press(dp, 1, f"s:{bd}"); await press(dp, 1, "menu"); check("Выбери предмет" in last(1)[1], "нажатие возвращает в главное меню")
+    check(home(1) == [] and all(b.style is None for row in last(1)[2].inline_keyboard for b in row), "остальные кнопки без цвета")
+    await press(dp, 1, f"s:{bd}")
+    check('"style":"danger"' in last(1)[2].model_dump_json(exclude_none=True).replace(" ", ""), "цвет уходит в запрос к Telegram")
+
     # ===== панели =====
     await text(dp, 900, "/admin"); check("Панель Админа" in last(900)[1] and "Админка" not in last(900)[1], "панель админа так и называется")
     check("abk" in buttons(900), "у админа есть «Копия базы»")
