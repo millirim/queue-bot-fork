@@ -9,6 +9,7 @@ main() {
     local cmd="${1:-help}"
     case "$cmd" in
         update)  need_root queue-bot update; update ;;
+        update-from-bot) need_root queue-bot update-from-bot; update_from_bot ;;
         status)  systemctl status queue-bot --no-pager -n 0 || true; echo; echo "Версия: $(version)" ;;
         logs)    journalctl -u queue-bot -f -n 50 ;;
         restart) need_root queue-bot restart
@@ -24,6 +25,7 @@ main() {
 queue-bot — управление ботом очереди
 
   sudo queue-bot update    обновить из GitHub (бэкап базы, откат, если не запустился)
+                           то же делает кнопка «🔄 Обновить бота» в Панели Админа
   queue-bot status         работает ли бот и какая версия
   queue-bot logs           логи в реальном времени (выход — Ctrl+C)
   sudo queue-bot restart   перезапустить
@@ -48,6 +50,9 @@ update() {
     old=$(git rev-parse HEAD)
     new=$(git rev-parse '@{u}')
     if [[ $old == "$new" ]]; then
+        # Код тот же, но службы приводим в порядок: так после обновления со старой версии команды queue-bot
+        # (она не знала про новые службы) второй запуск update включает всё недостающее, например кнопку в боте.
+        apply_code
         echo "Уже последняя версия: $(version)"
         return
     fi
@@ -70,6 +75,54 @@ update() {
     apply_code
     restart_and_check || true
     die "Обновление отменено, работает прошлая версия. Пришли лог выше разработчику."
+}
+
+# Обновление по запросу от бота (кнопка в Панели Админа). Запускает systemd (queue-bot-update.service) от root.
+# Делает то же, что update, и кладёт итог в $DATA/update-result — бот перешлёт его админу в чат.
+update_from_bot() {
+    local req="$DATA/update-request" running="$DATA/update-running" result="$DATA/update-result"
+    local chat_id old new out rc status
+    # Кто просил — только число; всё остальное из файла игнорируется.
+    chat_id=$("$CODE/.venv/bin/python" -I -c '
+import json, sys
+try:
+    value = json.load(open(sys.argv[1]))["chat_id"]
+    print(value if isinstance(value, int) and not isinstance(value, bool) else "")
+except Exception:
+    print("")' "$req" 2>/dev/null || true)
+    rm -f "$req"                        # сразу: иначе systemd запустил бы обновление снова
+    : > "$running"; chown "$APP_USER:$APP_USER" "$running"
+    # Путь подставляется сразу, в двойных кавычках: к концу работы локальной переменной $running уже не будет.
+    trap "rm -f '$running'" EXIT
+
+    old=$(version)
+    set +e
+    out=$(update 2>&1)                  # die() внутри завершает только эту подоболочку
+    rc=$?
+    set -e
+    new=$(version)
+    out=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+
+    if [[ $rc -ne 0 ]]; then status=failed
+    elif grep -q 'Уже последняя версия' <<<"$out"; then status=same
+    else status=ok; fi
+
+    STATUS=$status OLD=$old NEW=$new CHAT_ID=$chat_id OUT=$out RESULT=$result "$CODE/.venv/bin/python" -I -c '
+import json, os
+out = os.environ["OUT"].splitlines()
+data = {
+    "status": os.environ["STATUS"],
+    "old_version": os.environ["OLD"],
+    "version": os.environ["NEW"],
+    "chat_id": int(os.environ["CHAT_ID"]) if os.environ["CHAT_ID"].isdigit() else None,
+    "changes": [l[4:] for l in out if l.startswith("  • ")][:15],
+    "tail": "\n".join(out[-12:]),
+}
+with open(os.environ["RESULT"] + ".tmp", "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False)'
+    chown "$APP_USER:$APP_USER" "$result.tmp"
+    mv -f "$result.tmp" "$result"       # бот заберёт файл и пришлёт итог (updater.py)
+    [[ $status != failed ]]
 }
 
 main "$@"

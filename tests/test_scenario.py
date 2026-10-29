@@ -2,11 +2,13 @@
 заявки на −1 → журнал и серверные логи → копия базы. Один длинный прогон: каждая проверка названа по смыслу,
 при падении видно, какая именно. Как писать такие сценарии — см. tests/harness.py."""
 import asyncio
+import json
 import logging
 import tempfile
 
 import config
 import logsink
+import updater
 from db import Database
 from harness import Harness
 
@@ -29,6 +31,10 @@ def check(cond, what):
 
 def test_full_scenario(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ADMIN_IDS", {900})
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "state" / "q.db"))  # сюда updater кладёт запросы
+    (tmp_path / "state").mkdir()
+    monkeypatch.setattr(updater, "UNIT", tmp_path / "queue-bot-update.path")
+    (tmp_path / "queue-bot-update.path").write_text("")
     root = logging.getLogger()
     level = root.level
     try:
@@ -47,6 +53,7 @@ async def scenario(tmp_path):
     db = Database(str(tmp_path / "q.db"))
     await db.connect()
     dp = h.dispatcher(db)
+    state = tmp_path / "state"
     await text(dp, 1, "/start"); check("Свободных имён" in last(1)[1], "пустой список — понятное сообщение")
 
     # Админ загружает список группы вставкой текста
@@ -277,6 +284,30 @@ async def scenario(tmp_path):
     check("эмодзи" in last(900)[1], "при добавлении предмета спрашивают эмодзи")
     await press(dp, 900, "asek")
     check(any(x.name == "Новый" and x.emoji == "📚" for x in await db.subjects()), "«Пропустить» — эмодзи по умолчанию")
+
+    # ===== обновление бота по кнопке =====
+    await press(dp, 900, "adm"); check("abu" in buttons(900), "у админа в панели есть «Обновить бота»")
+    await text(dp, 7, "/moderator"); check("abu" not in buttons(7), "у старосты кнопки обновления нет")
+    await press(dp, 7, "abu"); check("только для админов" in session.alerts[-1], "староста обновить бота не может")
+    await press(dp, 7, "abuok"); check(not (state / "update-request").exists(), "и запрос так не создать")
+    updater.UNIT.unlink()
+    await press(dp, 900, "abu"); check("не включено" in last(900)[1] and "abuok" not in buttons(900), "без установки на сервере — подсказка")
+    await press(dp, 900, "abuok"); check(not (state / "update-request").exists(), "без установки запрос не создаётся")
+    updater.UNIT.write_text("")
+    (state / "version").write_text("2ef0eda от 29.10.2026 10:12", encoding="utf-8")
+    await press(dp, 900, "abu")
+    check("2ef0eda" in last(900)[1] and "abuok" in buttons(900), "экран обновления: версия и кнопка подтверждения")
+    await press(dp, 900, "abuok")
+    check(json.loads((state / "update-request").read_text(encoding="utf-8"))["chat_id"] == 900, "запрос создан и знает, кому ответить")
+    check("Обновляю" in last(900)[1], "админу сказали, что обновление пошло")
+    await press(dp, 900, "abu"); check("уже идёт" in last(900)[1] and "abuok" not in buttons(900), "повторно пока идёт — нельзя")
+    await press(dp, 900, "abuok"); check("уже идёт" in session.alerts[-1], "и подтвердить второй раз тоже")
+    (state / "update-request").unlink()
+    (state / "update-result").write_text(json.dumps({"status": "ok", "chat_id": 900, "old_version": "a1", "version": "b2",
+                                                     "changes": ["Новая фича"]}), encoding="utf-8")
+    await updater.deliver_once(h.bot)
+    check("Бот обновлён" in last(900)[1] and "Новая фича" in last(900)[1], "итог обновления пришёл админу в чат")
+    check("запрошено обновление бота" in " | ".join(r.text for r in await db.journal(500)), "запрос записан в журнал")
 
     # ===== копия базы =====
     await press(dp, 900, "abk")

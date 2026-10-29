@@ -21,6 +21,7 @@ from common import (
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, works,
 )
 import logsink
+import updater
 from db import ROLES, AuditRecord, Database, MinusRequest, Request, ServerLog, Student, parse_roster
 from ranking import WANT
 
@@ -95,6 +96,7 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
     ]
     if staff.admin:
         rows.append([btn("📚 Предметы", "as"), btn("💾 Копия базы", "abk")])
+        rows.append([btn("🔄 Обновить бота", "abu")])
     rows.append([MENU_BTN])
     who = "админ" if staff.admin else "староста"
     await show(
@@ -888,6 +890,52 @@ async def cb_journal_trace(cb: CallbackQuery, db: Database):
         return
     text = f"🔎 <b>Последняя ошибка</b> · {err.at:%d.%m.%Y %H:%M:%S}\n<pre>{esc(err.message[:300])}\n\n{esc(err.trace)}</pre>"
     await show(cb, text[:4000], kb([btn("⬅️ К журналу", "ajl:e:0")], [ADMIN_BTN]))
+
+
+# ================= обновление бота (только админ) =================
+async def show_update(cb: CallbackQuery, ack: bool = True):
+    """Что будет и подтверждение. Само обновление делает сервер (updater.py)."""
+    version = f"Сейчас: <code>{esc(updater.current_version())}</code>"
+    if not updater.available():
+        await show(
+            cb, f"🔄 <b>Обновить бота</b>\n{version}\n\n⚠️ На сервере ещё не включено обновление по кнопке. Выполни там "
+                "<code>sudo queue-bot update</code> (после обновления со старой версии — два раза подряд): "
+                "во второй раз он включит нужные службы, и кнопка заработает.",
+            kb([ADMIN_BTN]), ack,
+        )
+    elif updater.busy():
+        await show(cb, f"🔄 <b>Обновить бота</b>\n{version}\n\n⏳ Обновление уже идёт — итог придёт сюда.",
+                   kb([ADMIN_BTN]), ack)
+    else:
+        await show(
+            cb, f"🔄 <b>Обновить бота</b>\n{version}\n\nБот скачает последнюю версию с GitHub, сделает копию базы и "
+                "перезапустится (несколько секунд без ответов). Если новая версия не запустится — вернёт прежнюю. "
+                "Итог пришлю сюда.",
+            kb([btn("✅ Обновить сейчас", "abuok")], [ADMIN_BTN]), ack,
+        )
+
+
+@router.callback_query(F.data == "abu")
+async def cb_update(cb: CallbackQuery, db: Database):
+    if await need_staff(cb, db, admin_only=True):
+        await show_update(cb)
+
+
+@router.callback_query(F.data == "abuok")
+async def cb_update_confirm(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db, admin_only=True)):
+        return
+    if not updater.available() or not updater.request(cb.from_user.id):
+        await cb.answer("Обновление недоступно или уже идёт", show_alert=True)
+        await show_update(cb, ack=False)
+        return
+    await journal_add(db, staff, "запрошено обновление бота")
+    log.info("Админ (id %s) запросил обновление бота", staff.chat_id)
+    await cb.answer("Запрос отправлен")
+    await show(
+        cb, "⏳ <b>Обновляю бота…</b>\nСкачиваю версию, делаю копию базы, перезапускаю. Это занимает до минуты — "
+            "итог пришлю сюда.", kb([ADMIN_BTN]), ack=False,
+    )
 
 
 # ================= копия базы (только админ) =================

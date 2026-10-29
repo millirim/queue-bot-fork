@@ -1,0 +1,10 @@
+[Unit]
+Description=Запрос на обновление бота (кнопка «Обновить бота» в Панели Админа)
+
+[Path]
+# Бот (без прав root) кладёт сюда файл — systemd замечает его и запускает queue-bot-update.service.
+PathExists=/var/lib/queue-bot/update-request
+Unit=queue-bot-update.service
+
+[Install]
+WantedBy=multi-user.target
