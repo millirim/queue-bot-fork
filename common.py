@@ -14,7 +14,7 @@ from aiogram.types import (
 )
 
 import config
-from db import Database, Student, Subject
+from db import Database, Poll, Student, Subject
 from ranking import WANT, Row
 
 log = logging.getLogger(__name__)
@@ -298,3 +298,35 @@ def queue_text(subject: Subject, rows: list[Row], me: int | None = None, subgrou
     if not wanting:
         text += f"\n<i>Пока никто не нажал «{WANT} Хочу сдать следующее».</i>"
     return text
+
+
+# --- голосования ---
+POLL_MAX_OPTIONS = 8
+POLL_OPTION_LEN = 60
+
+
+def poll_text(poll: Poll, counts: dict[int, int] | None, members: int, mine: int | None = None) -> str:
+    """Текст голосования. counts=None — результаты скрыты (человек ещё не проголосовал); иначе столбики и проценты."""
+    status = "🔒 закрыто" if poll.closed else "открыто"
+    text = f"🗳 <b>{esc(poll.question)}</b>\n<i>Голосование {status}, анонимное: видно, сколько голосов, но не кто за что.</i>\n"
+    if counts is None:
+        return text + "\nВыбери вариант — после голоса увидишь результаты."
+    total = sum(counts.values())
+    text += "\n"
+    for option_id, option in poll.options:
+        n = counts.get(option_id, 0)
+        share = n / total if total else 0
+        bar = "█" * round(share * 10) + "░" * (10 - round(share * 10))
+        mark = "✅ " if option_id == mine else ""
+        text += f"{mark}{esc(option)}\n<code>{bar}</code> {n} ({round(share * 100)}%)\n"
+    text += f"\nПроголосовали: {total} из {members}."
+    if mine is not None and not poll.closed:
+        text += "\n<i>Передумал — нажми другой вариант, голос поменяется.</i>"
+    return text
+
+
+def poll_markup(poll: Poll, mine: int | None = None) -> InlineKeyboardMarkup | None:
+    """Кнопки вариантов; у закрытого голосования их нет."""
+    if poll.closed:
+        return None
+    return kb(*[[btn(("✅ " if option_id == mine else "") + option, f"pv:{poll.id}:{option_id}")] for option_id, option in poll.options])

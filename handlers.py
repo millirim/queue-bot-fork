@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 import config
 from admin import close_notices, notify_minus, notify_reviewers
 from common import (
-    MENU_BTN, bottom_for, btn, esc, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view,
+    MENU_BTN, bottom_for, btn, esc, poll_markup, poll_text, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view,
     show, staff_kind, subgroup_buttons, subgroup_view, updated_at,
 )
 from db import Database, Student
@@ -362,6 +362,31 @@ async def cb_my(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
     if student := await require_student(cb, db):
         await show_my(cb, db, student)
+
+
+# ================= голосования =================
+@router.callback_query(F.data.regexp(r"^pv:\d+:\d+$"))
+async def cb_poll_vote(cb: CallbackQuery, db: Database):
+    _, poll_id, option_id = cb.data.split(":")
+    student = await db.student_by_chat(cb.from_user.id)
+    if student is None:
+        await cb.answer("Голосуют только участники группы в боте", show_alert=True)
+        return
+    result = await db.vote(int(poll_id), student.id, int(option_id))
+    poll = await db.get_poll(int(poll_id))
+    if poll is None:
+        await cb.answer("Такого голосования больше нет", show_alert=True)
+        return
+    members = len(await db.member_chats())
+    if result == "closed":
+        await cb.answer("Голосование закрыто", show_alert=True)
+    elif result == "same":
+        await cb.answer("Ты уже проголосовал(а) так")
+        return
+    mine = await db.my_vote(poll.id, student.id)
+    await show(cb, poll_text(poll, await db.poll_counts(poll.id), members, mine), poll_markup(poll, mine), ack=result == "ok")
+    if result == "ok":
+        await cb.answer("Голос принят")
 
 
 # ================= запасные обработчики (регистрировать последними) =================
