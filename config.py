@@ -32,3 +32,11 @@ SUBJECTS: dict[str, tuple[int, str]] = {
 
 # Разовое переименование предметов, заведённых прежними версиями (выполняется один раз на базу).
 LEGACY_SUBJECT_NAMES = {"БЖЧ — лабы": "БЖЧ-ЛР", "БЖЧ — практики": "БЖЧ-ПЗ"}
+
+# Веб-панель (web.py). WEB_PORT=0 — выключена. По умолчанию слушает только этот компьютер (127.0.0.1):
+# наружу её выпускают через обратный прокси или туннель с HTTPS, адрес для ссылок из бота — WEB_URL.
+WEB_PORT = int(os.getenv("WEB_PORT", "8080") or 0)
+WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
+WEB_URL = (os.getenv("WEB_URL", "").strip() or f"http://{WEB_HOST}:{WEB_PORT}").rstrip("/")
+# Кому можно входить: admin, starosta, user через запятую. Пока — только админам.
+WEB_ROLES = {r for r in os.getenv("WEB_ROLES", "admin").replace(" ", "").split(",") if r} & {"admin", "starosta", "user"}
