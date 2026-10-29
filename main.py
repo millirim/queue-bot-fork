@@ -41,6 +41,7 @@ async def main() -> None:
     )
     dp = Dispatcher()
     dp["db"] = db
+    db.on_swap_ended = lambda kind, swap, who: handlers.swap_ended(bot, db, kind, swap, who)
     # Панель админа первой: в handlers последними стоят запасные обработчики, которые ловят всё подряд.
     dp.include_router(bottom.router)  # самым первым: нажатие нижней кнопки не должно попасть в ввод текста
     dp.include_router(admin.router)

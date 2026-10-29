@@ -277,7 +277,7 @@ async def queue_json(db: Database, v: Viewer, subject) -> dict:
     out, me = [], None
     for place, r in enumerate(rows, 1):
         item = {"place": place, "id": r.student_id, "name": r.name, "done": r.done, "wants": r.wants,
-                "in_bot": r.in_bot, "subgroup": r.subgroup, "me": r.student_id == me_id}
+                "in_bot": r.in_bot, "subgroup": r.subgroup, "me": r.student_id == me_id, "swapped": r.swapped}
         out.append(item)
         if item["me"]:
             me = dict(item)
@@ -285,8 +285,12 @@ async def queue_json(db: Database, v: Viewer, subject) -> dict:
         until = await db.undo_until(me_id, subject.id)
         me.update(undo_until=iso(until), can_want=not me["wants"] and me["done"] < subject.total,
                   can_done=me["done"] < subject.total, can_minus=me["done"] > 0 and until is None)
-    return {"subject": subject_json(subject), "rows": out, "me": me, "editable": v.at_least("starosta"),
+    data = {"subject": subject_json(subject), "rows": out, "me": me, "editable": v.at_least("starosta"),
             "subgroups": any(r.subgroup for r in rows), "at": iso(local_now())}
+    if v.at_least("admin"):  # обмены местами: админ может разорвать
+        data["swaps"] = [{"id": w.id, "a": (await db.get_student(w.from_id)).name, "b": (await db.get_student(w.to_id)).name}
+                         for w in await db.active_swaps(subject.id)]
+    return data
 
 
 async def api_subjects(request: web.Request) -> web.Response:
@@ -634,6 +638,20 @@ async def api_broadcast(request: web.Request) -> web.Response:
     return web.json_response({"sent": sent, "total": len(chat_ids)})
 
 
+async def api_swap_cancel(request: web.Request) -> web.Response:
+    """Админ разрывает обмен местами: оба на своих местах, лимит у них не тратится."""
+    v = await need(request, "admin")
+    db = db_of(request)
+    swap = await db.end_swap(int_arg(request, "wid"), "cancelled")
+    if swap is None:
+        raise Fail("Этот обмен уже не действует", 409)
+    a, b, subject = await db.get_student(swap.from_id), await db.get_student(swap.to_id), await db.get_subject(swap.subject_id)
+    await journal(db, v, f"обмен разорван: {a.name} ↔ {b.name} · {subject.name}")
+    for who in (a, b):
+        await notify(bot_of(request), who, f"🔁 Обмен по {esc(subject.title)} отменён ({esc(v.staff.signature)}). Ты на своём обычном месте.")
+    return web.json_response({"ok": True})
+
+
 # ================= голосования =================
 async def poll_json(db: Database, v: Viewer, poll) -> dict:
     """Голосование глазами смотрящего. Цифры видны админу, проголосовавшему и когда голосование закрыто; кто за что — никому."""
@@ -897,6 +915,7 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_post("/api/queue/{sid:\\d+}/undo", api_undo)
     r.add_post("/api/queue/{sid:\\d+}/minus", api_ask_minus)
     r.add_post("/api/progress/{sid:\\d+}/{pid:\\d+}", api_progress)
+    r.add_post("/api/swaps/{wid:\\d+}/cancel", api_swap_cancel)
     r.add_get("/api/polls", api_polls)
     r.add_post("/api/polls", api_poll_add)
     r.add_post("/api/polls/{pid:\\d+}/vote", api_poll_vote)

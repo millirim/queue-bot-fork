@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 import config
 from admin import close_notices, notify_minus, notify_reviewers
 from common import (
-    MENU_BTN, bottom_for, btn, esc, poll_markup, poll_text, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view,
+    MENU_BTN, bottom_for, btn, esc, poll_markup, poll_text, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view, short_name,
     show, staff_kind, subgroup_buttons, subgroup_view, updated_at,
 )
 from db import Database, Student
@@ -203,11 +203,15 @@ async def show_queue(target: Message | CallbackQuery, db: Database, student: Stu
             row.append(btn("🙏 Попросить −1", f"sm:{subject.id}"))
         if row:
             buttons.append(row)
+    swap_note = ""
+    if me:
+        swap_note, swap_buttons = await swap_block(db, subject, student, me)
+        buttons += swap_buttons
     view = subgroup_view(target.from_user.id)
     if filters := subgroup_buttons(rows, view, f"sf:{subject.id}"):
         buttons.append(filters)
     buttons.append([btn("🔄 Обновить", f"sr:{subject.id}"), MENU_BTN])
-    await show(target, queue_text(subject, rows, me=student.id, subgroup=view) + updated_at(), kb(*buttons), ack)
+    await show(target, queue_text(subject, rows, me=student.id, subgroup=view) + swap_note + updated_at(), kb(*buttons), ack)
 
 
 @router.callback_query(F.data.regexp(r"^sf:\d+:[012]$"))
@@ -362,6 +366,134 @@ async def cb_my(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
     if student := await require_student(cb, db):
         await show_my(cb, db, student)
+
+
+# ================= обмен местами =================
+async def swap_block(db: Database, subject, student: Student, me) -> tuple[str, list]:
+    """Строка про обмен под очередью и кнопки: «Поменяться» / «Отменить обмен»."""
+    if active := await db.active_swaps(subject.id, student.id):
+        other = await db.get_student(active[0].partner(student.id))
+        note = f"\n\n🔁 <b>Обмен с {esc(short_name(other.name))}</b>: вы на местах друг друга, пока кто-то из вас не сдаст."
+        if not me.swapped:
+            note += "\n<i>Сейчас не действует: нужно, чтобы вы оба были с 🙋 или оба без.</i>"
+        return note, [[btn("↩️ Отменить обмен", f"sxc:{active[0].id}")]]
+    if pending := [p for p in await db.pending_swaps(subject.id, student.id) if p.from_id == student.id]:
+        other = await db.get_student(pending[0].to_id)
+        return (f"\n\n⏳ Ждём ответа от {esc(short_name(other.name))} на предложение обмена.",
+                [[btn("↩️ Отозвать предложение", f"sxc:{pending[0].id}")]])
+    if me.done < subject.total:
+        return "", [[btn("🔁 Поменяться местами", f"sx:{subject.id}")]]
+    return "", []
+
+
+async def places(db: Database, subject_id: int, *student_ids: int) -> dict[int, int]:
+    return {r.student_id: i for i, r in enumerate(await db.queue(subject_id), 1) if r.student_id in student_ids}
+
+
+@router.callback_query(F.data.regexp(r"^sx:\d+$"))
+async def cb_swap_pick(cb: CallbackQuery, db: Database):
+    if not (student := await require_student(cb, db)):
+        return
+    subject = await db.get_subject(int(cb.data[3:]))
+    if subject is None:
+        await cb.answer("Этого предмета больше нет", show_alert=True)
+        return
+    if reason := await db.swap_blocked(student.id, subject.id):
+        await cb.answer(f"Нельзя: {reason}", show_alert=True)
+        return
+    options = []
+    for place, row in enumerate(await db.queue(subject.id), 1):
+        if row.student_id != student.id and row.in_bot and not await db.swap_blocked(row.student_id, subject.id):
+            options.append(btn(f"{place}. {short_name(row.name)}", f"sxp:{subject.id}:{row.student_id}"))
+    await show(
+        cb,
+        f"🔁 <b>Обмен местами · {esc(subject.title)}</b>\n\nВыбери, с кем поменяться — ему придёт предложение. "
+        "Меняются местами только вы двое, места остальных не двигаются. Обмен действует, пока кто-то из вас не сдаст "
+        "(потом оба на своих местах), и его можно отменить в любой момент. Один обмен на каждую работу.\n\n"
+        + ("" if options else "Сейчас не с кем: другие уже менялись на этой работе или не в боте."),
+        kb(*rows_of(options), [btn("⬅️ Назад", f"s:{subject.id}")]),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^sxp:\d+:\d+$"))
+async def cb_swap_propose(cb: CallbackQuery, db: Database):
+    if not (student := await require_student(cb, db)):
+        return
+    _, subject_id, target_id = cb.data.split(":")
+    subject, target = await db.get_subject(int(subject_id)), await db.get_student(int(target_id))
+    if subject is None or target is None or not target.linked:
+        await cb.answer("Этого человека или предмета больше нет", show_alert=True)
+        return
+    result = await db.propose_swap(student.id, target.id, subject.id)
+    if isinstance(result, str):
+        await cb.answer(result, show_alert=True)
+        return
+    where = await places(db, subject.id, student.id, target.id)
+    sent = await send(
+        cb.bot, target.chat_id,
+        f"🔁 <b>{esc(short_name(student.name))}</b> предлагает поменяться местами по {esc(subject.title)}: "
+        f"ты №{where[target.id]} ↔ он(а) №{where[student.id]}.\n\nМеняетесь только вы двое, остальные места не двигаются. "
+        "Обмен действует, пока кто-то из вас не сдаст; отменить можно в любой момент. Предложение живёт сутки.",
+        kb([btn("✅ Согласен", f"sxy:{result}"), btn("❌ Нет", f"sxn:{result}")]),
+    )
+    if sent is None:
+        await db.end_swap(result, "cancelled")
+        await cb.answer("Не получилось отправить предложение", show_alert=True)
+        return
+    await cb.answer("Предложение отправлено")
+    await show_queue(cb, db, student, subject.id, ack=False)
+
+
+@router.callback_query(F.data.regexp(r"^sxy:\d+$"))
+async def cb_swap_accept(cb: CallbackQuery, db: Database):
+    if not (student := await require_student(cb, db)):
+        return
+    result = await db.accept_swap(int(cb.data[4:]), student.id)
+    if isinstance(result, str):
+        await cb.answer(result, show_alert=True)
+        await show(cb, f"🔁 {result}", kb([MENU_BTN]), ack=False)
+        return
+    subject, other = await db.get_subject(result.subject_id), await db.get_student(result.partner(student.id))
+    where = await places(db, subject.id, student.id, other.id)
+    await send(cb.bot, other.chat_id, f"🔁 <b>{esc(short_name(student.name))}</b> согласился(лась) поменяться по {esc(subject.title)}. "
+               f"Теперь ты №{where[other.id]}, он(а) №{where[student.id]}.", kb([btn("📋 К очереди", f"s:{subject.id}")]))
+    await cb.answer("Обмен действует")
+    await show(cb, f"🔁 Обмен с {esc(short_name(other.name))} действует. Теперь ты №{where[student.id]} по {esc(subject.title)}.",
+               kb([btn("📋 К очереди", f"s:{subject.id}")]), ack=False)
+
+
+@router.callback_query(F.data.regexp(r"^(sxn|sxc):\d+$"))
+async def cb_swap_end(cb: CallbackQuery, db: Database):
+    """sxn — отказаться от предложения, sxc — отозвать своё предложение или отменить действующий обмен."""
+    if not (student := await require_student(cb, db)):
+        return
+    action, swap_id = cb.data.split(":")
+    swap = await db.get_swap(int(swap_id))
+    if swap is None or student.id not in (swap.from_id, swap.to_id) or swap.status not in ("pending", "active"):
+        await cb.answer("Это уже не действует", show_alert=True)
+        await show(cb, "🔁 Это предложение уже не действует.", kb([MENU_BTN]), ack=False)
+        return
+    declined = action == "sxn" and swap.status == "pending" and swap.to_id == student.id
+    await db.end_swap(swap.id, "declined" if declined else "cancelled")
+    subject, other = await db.get_subject(swap.subject_id), await db.get_student(swap.partner(student.id))
+    theirs, mine = (("отказался(лась) от обмена", "Предложение отклонено") if declined else
+                    ("отменил(а) обмен", "Обмен отменён") if swap.status == "active" else
+                    ("отозвал(а) предложение обмена", "Предложение отозвано"))
+    await send(cb.bot, other.chat_id, f"🔁 {esc(short_name(student.name))} {theirs} по {esc(subject.title)}.")
+    await cb.answer("Готово")
+    await show(cb, f"🔁 {mine}: {esc(subject.title)}.", kb([btn("📋 К очереди", f"s:{subject.id}")]), ack=False)
+
+
+async def swap_ended(bot, db: Database, kind: str, swap, student_id: int) -> None:
+    """Обмен закончился сам: предупреждаем второго участника (Database.on_swap_ended, ставится в main.py)."""
+    student, other = await db.get_student(student_id), await db.get_student(swap.partner(student_id))
+    subject = await db.get_subject(swap.subject_id)
+    if student is None or other is None or subject is None or not other.linked:
+        return
+    cause = (f"{esc(short_name(student.name))} убран(а) из группы" if kind == "cancelled"
+             else f"у {esc(short_name(student.name))} изменилось число сданных")
+    await send(bot, other.chat_id, f"🔁 Обмен по {esc(subject.title)} закончился: {cause}. Ты снова на своём обычном месте.",
+               kb([btn("📋 К очереди", f"s:{subject.id}")]))
 
 
 # ================= голосования =================

@@ -11,11 +11,12 @@ from datetime import datetime, timedelta
 import aiosqlite
 
 import config
-from ranking import Row, draw_lot, order
+from ranking import Row, apply_swaps, draw_lot, order
 
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
+SWAP_ASK_HOURS = 24  # сколько живёт предложение обмена без ответа
 UNDO_SECONDS = 60  # сколько можно отменить своё «Сдал»
 LOG_KEEP = 5000    # сколько последних серверных логов хранить
 
@@ -123,6 +124,21 @@ CREATE TABLE IF NOT EXISTS web_sessions (
     expires_at TEXT NOT NULL                -- ISO, местное время; после — недействителен
 );
 
+-- Обмен местами по предмету: двое по обоюдному согласию меняются местами. Действует, пока кто-то из двоих не сдал
+-- (тогда 'used'); 'used' и 'active' навсегда занимают «номер работы» у обоих — откат сданных лимит не возвращает.
+CREATE TABLE IF NOT EXISTS swaps (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    from_id    INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,   -- кто предложил
+    to_id      INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,   -- кому
+    status     TEXT NOT NULL,               -- pending, active, used, cancelled, declined
+    work_from  INTEGER,                     -- какую по счёту работу сдавал from_id, когда согласились (сдано + 1)
+    work_to    INTEGER,                     -- то же для to_id
+    created_at TEXT NOT NULL,               -- ISO, местное время
+    ended_at   TEXT,                        -- когда закончился или отменён
+    ended_by   INTEGER                      -- кто сдал и этим закончил обмен (для отмены «Сдал» в течение минуты)
+);
+
 -- Голосования: вопрос с вариантами; один голос на человека, пока голосование открыто его можно поменять.
 CREATE TABLE IF NOT EXISTS polls (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,6 +226,21 @@ class Poll:
 
 
 @dataclass
+class Swap:
+    id: int
+    subject_id: int
+    from_id: int
+    to_id: int
+    status: str
+    work_from: int | None
+    work_to: int | None
+    created_at: str
+
+    def partner(self, student_id: int) -> int:
+        return self.to_id if student_id == self.from_id else self.from_id
+
+
+@dataclass
 class Standing:
     """Где человек в очереди по предмету: общая очередь и своя подгруппа (sub_place = 0 — подгруппа не указана)."""
     row: Row
@@ -274,6 +305,9 @@ class Database:
     def __init__(self, path: str):
         self.path = path
         self.conn: aiosqlite.Connection | None = None
+        # Вызывается, когда обмен закончился сам (не по кнопке участника): await hook(kind, swap, student_id),
+        # kind — 'used' (кто-то сдал или поправили счётчик) или 'cancelled' (человека убрали из группы). Ставит main.py.
+        self.on_swap_ended = None
 
     async def connect(self) -> None:
         folder = os.path.dirname(self.path)
@@ -398,6 +432,12 @@ class Database:
         """Убрать из группы / вернуть. Сданные сохраняются, отметки «хочу сдать» снимаются."""
         await self._write("UPDATE students SET active = ? WHERE id = ?", (int(active), student_id))
         await self._write("UPDATE progress SET want_since = NULL WHERE student_id = ?", (student_id,))
+        if not active:
+            gone = await self.active_swaps(student_id=student_id)
+            await self._write("UPDATE swaps SET status = 'cancelled', ended_at = ? WHERE status IN ('pending', 'active') "
+                              "AND (from_id = ? OR to_id = ?)", (local_now().isoformat(timespec="seconds"), student_id, student_id))
+            for swap in gone:
+                await self._swap_hook("cancelled", swap, student_id)
 
     async def unlink(self, student_id: int) -> int | None:
         """Отвязывает Telegram от человека (например, если выбрал не себя). Роль остаётся за ФИО.
@@ -439,6 +479,123 @@ class Database:
     async def member_chats(self) -> list[int]:
         """Telegram всех из группы, кто есть в боте."""
         return [s.chat_id for s in await self.students() if s.linked]
+
+    # --- обмен местами ---
+    def _swap(self, row) -> Swap:
+        return Swap(row["id"], row["subject_id"], row["from_id"], row["to_id"], row["status"], row["work_from"],
+                    row["work_to"], row["created_at"])
+
+    async def get_swap(self, swap_id: int) -> Swap | None:
+        row = await self._one("SELECT * FROM swaps WHERE id = ?", (swap_id,))
+        return self._swap(row) if row else None
+
+    async def active_swaps(self, subject_id: int | None = None, student_id: int | None = None) -> list[Swap]:
+        """Действующие обмены: все, по предмету и/или с участием человека."""
+        sql, args = "SELECT * FROM swaps WHERE status = 'active'", []
+        if subject_id is not None:
+            sql += " AND subject_id = ?"; args.append(subject_id)
+        if student_id is not None:
+            sql += " AND (from_id = ? OR to_id = ?)"; args += [student_id, student_id]
+        return [self._swap(r) for r in await self._all(sql + " ORDER BY id", args)]
+
+    async def pending_swaps(self, subject_id: int, student_id: int) -> list[Swap]:
+        """Живые предложения по предмету, где человек — любая из сторон (просроченные не в счёт)."""
+        since = (local_now() - timedelta(hours=SWAP_ASK_HOURS)).isoformat(timespec="seconds")
+        rows = await self._all(
+            "SELECT * FROM swaps WHERE subject_id = ? AND status = 'pending' AND created_at >= ? AND (from_id = ? OR to_id = ?) "
+            "ORDER BY id", (subject_id, since, student_id, student_id))
+        return [self._swap(r) for r in rows]
+
+    async def swap_blocked(self, student_id: int, subject_id: int) -> str | None:
+        """Почему человеку нельзя меняться по предмету сейчас (None — можно). Лимит — один обмен на каждую работу:
+        номер «сдано + 1», на котором обмен был (действует или использован), занят навсегда, даже после отката."""
+        student = await self.get_student(student_id)
+        subject = await self.get_subject(subject_id)
+        if student is None or subject is None or not student.active:
+            return "человека или предмета больше нет"
+        if not student.linked:
+            return "не зашёл(ла) в бота"
+        done = (await self._one("SELECT COALESCE(MAX(done), 0) AS d FROM progress WHERE student_id = ? AND subject_id = ?",
+                                (student_id, subject_id)))["d"]
+        if done >= subject.total:
+            return "уже сдал(а) всё по предмету"
+        used = await self._one(
+            "SELECT 1 FROM swaps WHERE subject_id = ? AND status IN ('active', 'used') AND "
+            "((from_id = ? AND work_from = ?) OR (to_id = ? AND work_to = ?))",
+            (subject_id, student_id, done + 1, student_id, done + 1))
+        if used:
+            return f"обмен на работе №{done + 1} уже был — следующий можно после «Сдал»"
+        return None
+
+    async def propose_swap(self, from_id: int, to_id: int, subject_id: int) -> int | str:
+        """Предложение обмена. Возвращает id или текст, почему нельзя. Прежнее моё предложение по предмету заменяется."""
+        if from_id == to_id:
+            return "С собой не поменяться"
+        if reason := await self.swap_blocked(from_id, subject_id):
+            return f"Тебе: {reason}"
+        if reason := await self.swap_blocked(to_id, subject_id):
+            return f"Ему/ей: {reason}"
+        now = local_now().isoformat(timespec="seconds")
+        await self.conn.execute("UPDATE swaps SET status = 'cancelled', ended_at = ? WHERE status = 'pending' "
+                                "AND from_id = ? AND subject_id = ?", (now, from_id, subject_id))
+        cur = await self.conn.execute(
+            "INSERT INTO swaps (subject_id, from_id, to_id, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            (subject_id, from_id, to_id, now))
+        await self.conn.commit()
+        return cur.lastrowid
+
+    async def accept_swap(self, swap_id: int, student_id: int) -> Swap | str:
+        """Согласие. Возвращает действующий обмен или текст отказа (лимит проверяется заново у обоих)."""
+        swap = await self.get_swap(swap_id)
+        if swap is None or swap.status != "pending":
+            return "Это предложение уже не действует"
+        if swap.to_id != student_id:
+            return "Это предложение не тебе"
+        if swap not in await self.pending_swaps(swap.subject_id, student_id):
+            return "Предложение устарело — пусть предложат заново"
+        for who, text in ((swap.to_id, "Тебе"), (swap.from_id, "Ему/ей")):
+            if reason := await self.swap_blocked(who, swap.subject_id):
+                return f"{text}: {reason}"
+        work = {}
+        for who in (swap.from_id, swap.to_id):
+            work[who] = (await self._one("SELECT COALESCE(MAX(done), 0) AS d FROM progress WHERE student_id = ? AND subject_id = ?",
+                                         (who, swap.subject_id)))["d"] + 1
+        await self._write(
+            "UPDATE swaps SET status = 'active', work_from = ?, work_to = ? WHERE id = ?",
+            (work[swap.from_id], work[swap.to_id], swap_id))
+        # Остальные предложения этих двоих по предмету теряют смысл: у каждого теперь есть обмен.
+        await self._write(
+            "UPDATE swaps SET status = 'cancelled', ended_at = ? WHERE status = 'pending' AND subject_id = ? AND id != ? "
+            "AND (from_id IN (?, ?) OR to_id IN (?, ?))",
+            (local_now().isoformat(timespec="seconds"), swap.subject_id, swap_id, swap.from_id, swap.to_id, swap.from_id, swap.to_id))
+        return await self.get_swap(swap_id)
+
+    async def end_swap(self, swap_id: int, status: str) -> Swap | None:
+        """Отмена ('cancelled'), отказ ('declined'). Лимит не тратится: тратит только обмен, закончившийся «Сдал»."""
+        assert status in ("cancelled", "declined")
+        swap = await self.get_swap(swap_id)
+        if swap is None or swap.status not in ("pending", "active"):
+            return None
+        await self._write("UPDATE swaps SET status = ?, ended_at = ? WHERE id = ?",
+                          (status, local_now().isoformat(timespec="seconds"), swap_id))
+        return swap
+
+    async def _end_swaps(self, student_id: int, subject_id: int) -> None:
+        """Число сданных изменилось — действующий обмен человека заканчивается и считается использованным."""
+        ended = await self.active_swaps(subject_id, student_id)
+        await self._write(
+            "UPDATE swaps SET status = 'used', ended_at = ?, ended_by = ? WHERE status = 'active' AND subject_id = ? "
+            "AND (from_id = ? OR to_id = ?)",
+            (local_now().isoformat(timespec="seconds"), student_id, subject_id, student_id, student_id))
+        for swap in ended:
+            await self._swap_hook("used", swap, student_id)
+
+    async def _swap_hook(self, kind: str, swap: Swap, student_id: int) -> None:
+        if self.on_swap_ended:
+            try:
+                await self.on_swap_ended(kind, swap, student_id)
+            except Exception:
+                log.exception("Не удалось предупредить об окончании обмена #%s", swap.id)
 
     # --- голосования ---
     async def create_poll(self, question: str, options: list[str], by: str) -> int:
@@ -604,11 +761,13 @@ class Database:
             (subject_id,),
         )
         lots = await self._lots(subject_id, [(r["id"], r["done"]) for r in rows if r["want_since"]])
-        return order([
+        swaps = await self._all("SELECT from_id, to_id FROM swaps WHERE subject_id = ? AND status = 'active' ORDER BY id",
+                                (subject_id,))
+        return apply_swaps(order([
             Row(r["id"], r["name"], r["done"], r["want_since"] is not None, lots.get(r["id"]),
                 r["chat_id"] is not None, r["subgroup"])
             for r in rows
-        ])
+        ]), [(w["from_id"], w["to_id"]) for w in swaps])
 
     async def _lots(self, subject_id: int, wanting: list[tuple[int, int]]) -> dict[int, int]:
         """Жребий для каждого желающего: на (работа = сдано + 1, сегодня). Нет — бросается сейчас, один раз."""
@@ -676,6 +835,7 @@ class Database:
         )
         if not changed:
             return None
+        await self._end_swaps(student_id, subject_id)
         return (await self._one(
             "SELECT done FROM progress WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
         ))["done"]
@@ -710,6 +870,13 @@ class Database:
             "WHERE student_id = ? AND subject_id = ? AND done > 0",
             (student_id, subject_id),
         )
+        if await self.active_swaps(subject_id, student_id):
+            await self._end_swaps(student_id, subject_id)  # за эту минуту успел договориться о новом — число сданных снова другое
+        else:  # обмен, который закончил этот «Сдал», возвращается: ошибся кнопкой — ничего не потерял
+            since = (local_now() - timedelta(seconds=UNDO_SECONDS + 5)).isoformat(timespec="seconds")
+            await self._write(
+                "UPDATE swaps SET status = 'active', ended_at = NULL, ended_by = NULL WHERE subject_id = ? AND ended_by = ? "
+                "AND status = 'used' AND ended_at >= ?", (subject_id, student_id, since))
         return (await self._one(
             "SELECT done FROM progress WHERE student_id = ? AND subject_id = ?", (student_id, subject_id)
         ))["done"]

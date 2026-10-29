@@ -292,7 +292,7 @@ def queue_text(subject: Subject, rows: list[Row], me: int | None = None, subgrou
         if section(r) != current:
             current = section(r)
             text += f"\n{current}\n"
-        mark = " 👈 <i>это ты</i>" if r.student_id == me else ""
+        mark = (" 🔁" if r.swapped else "") + (" 👈 <i>это ты</i>" if r.student_id == me else "")
         done = f" — {r.done}/{subject.total}" if r.in_bot or r.done else ""
         text += f"{i}. {esc(short_name(r.name))}{done}{mark}\n"
     if not wanting:

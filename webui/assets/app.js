@@ -781,6 +781,18 @@ PAGES.queue = async (page, sid, token) => {
       h("div", { class: "acts" }, acts));
   };
 
+  const swapsCard = () => {
+    if (!data.swaps || !data.swaps.length) return null;
+    return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", { text: "Обмены местами" }),
+      h("span", { class: "sub", text: "действуют, пока кто-то из пары не сдаст" })),
+      h("div", { class: "card-body" }, data.swaps.map((w) => h("div", { class: "poll-row" },
+        h("span", { class: "poll-text", text: `${shortName(w.a)} ↔ ${shortName(w.b)}` }),
+        button("Разорвать", { kind: "sm danger", onClick: async () => {
+          if (!(await confirmDialog("Разорвать обмен", `${shortName(w.a)} и ${shortName(w.b)} вернутся на свои места. У них лимит не потратится.`, "Разорвать", true))) return;
+          await api(`/api/swaps/${w.id}/cancel`, { method: "POST", body: {} }); toast("Обмен разорван"); await refresh();
+        } })))));
+  };
+
   const askMinus = async (s, me) => {
     const reason = h("textarea", { class: "textarea", maxlength: "300", placeholder: "Например: нажал «Сдал», а преподаватель не засчитал" });
     await dialog({
@@ -824,7 +836,7 @@ PAGES.queue = async (page, sid, token) => {
       const open = () => { state.onPersonChange = refresh; openPerson(r.id); };
       body.push(h("tr", { class: (r.me ? "me " : "") + (data.editable ? "link" : ""), onclick: data.editable ? open : null },
         h("td", { class: "place", text: i + 1 }),
-        h("td", null, h("span", { text: r.name }), r.me ? h("span", { class: "faint", text: " · это ты" }) : null),
+        h("td", null, h("span", { text: r.name }), r.swapped ? h("span", { class: "faint", title: "Стоит на месте по обмену", text: " 🔁" }) : null, r.me ? h("span", { class: "faint", text: " · это ты" }) : null),
         h("td", { class: "hide-sm" }, r.subgroup ? `${r.subgroup} подгр.` : h("span", { class: "faint", text: "—" })),
         h("td", null, h("span", { class: "progress-cell" }, h("span", { class: "num", text: `${r.done}/${s.total}` }), bar)),
         h("td", { class: "nowrap" }, r.wants ? h("span", { class: "pill warn", text: "хочет сдать" }) : !r.in_bot ? h("span", { class: "pill", text: "не в боте" }) : null),
@@ -840,6 +852,7 @@ PAGES.queue = async (page, sid, token) => {
         actions: [filters, refreshBtn],
       }),
       mineCard(),
+      swapsCard(),
       h("div", { class: "card" },
         h("div", { class: "card-head" }, h("h2", { text: filter.sub ? `${filter.sub} подгруппа` : "Вся группа" }),
           h("span", { class: "sub", text: data.editable ? "нажми на человека — откроется карточка" : "порядок один для всех, подгруппа — только фильтр" }),
