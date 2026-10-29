@@ -69,9 +69,11 @@ class Harness:
 
     def dispatcher(self, db) -> Dispatcher:
         import admin
+        import bottom
         import handlers
         dp = Dispatcher()
         dp["db"] = db
+        dp.include_router(bottom.router)
         dp.include_router(admin.router)  # как в main.py: сначала панель, запасные обработчики — в самом конце
         dp.include_router(handlers.router)
         return dp
@@ -97,8 +99,15 @@ class Harness:
 
     def buttons(self, chat_id: int) -> list[str]:
         markup = self.last(chat_id)[2]
-        return [b.callback_data for row in (markup.inline_keyboard if markup else []) for b in row]
+        return [b.callback_data for row in getattr(markup, "inline_keyboard", []) for b in row]
 
     def labels(self, chat_id: int) -> list[str]:
         markup = self.last(chat_id)[2]
-        return [b.text for row in (markup.inline_keyboard if markup else []) for b in row]
+        return [b.text for row in getattr(markup, "inline_keyboard", []) for b in row]
+
+    def bottom(self, chat_id: int) -> list[str]:
+        """Подписи кнопок под полем ввода, которые бот выставил человеку последними."""
+        for _, _, markup in (s for s in reversed(self.session.sent) if s[0] == chat_id):
+            if hasattr(markup, "keyboard"):
+                return [b.text for row in markup.keyboard for b in row]
+        return []

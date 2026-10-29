@@ -49,7 +49,7 @@ def test_full_scenario(tmp_path, monkeypatch):
 async def scenario(tmp_path):
     h = Harness()
     session = h.session
-    text, press, last, buttons, labels = h.text, h.press, h.last, h.buttons, h.labels
+    text, press, last, buttons, labels, bottom = h.text, h.press, h.last, h.buttons, h.labels, h.bottom
     db = Database(str(tmp_path / "q.db"))
     await db.connect()
     dp = h.dispatcher(db)
@@ -232,7 +232,7 @@ async def scenario(tmp_path):
     await press(dp, 900, f"mr:no:{own}:l"); check("отклонили" in last(7)[1], "отклонение — человеку ответ")
 
     # ===== «Моё» вместо «Мои сданные» и «Профиль» =====
-    await text(dp, 1, "/start")
+    await text(dp, 1, "/start"); await text(dp, 1, "🏠 На главную")
     check("my" in buttons(1) and "profile" not in buttons(1), "в меню одна кнопка «Моё»")
     check(any(l == "👤 Моё" for l in labels(1)), "кнопка называется «Моё»")
     check(any("🔥 ПнаЯВУ" in l for l in labels(1)) and any("💅 БД" in l for l in labels(1)), "в меню предметы с эмодзи")
@@ -253,7 +253,7 @@ async def scenario(tmp_path):
     await press(dp, 1, "my"); check(len(home(1)) == 1 and home(1)[0].style == "danger", "«Моё»: красная «На главную»")
     await press(dp, 1, "help"); check(len(home(1)) == 1, "«Как это работает»: есть «На главную»")
     await press(dp, 900, "adm"); check(len(home(900)) == 1 and home(900)[0].style == "danger", "панель: красная «На главную»")
-    await text(dp, 1, "/start"); check(not home(1), "в самом главном меню кнопки «На главную» нет")
+    await text(dp, 1, "🏠 На главную"); check(not home(1), "в самом главном меню кнопки «На главную» нет")
     await press(dp, 1, f"s:{bd}"); await press(dp, 1, "menu"); check("Выбери предмет" in last(1)[1], "нажатие возвращает в главное меню")
     check(home(1) == [] and all(b.style is None for row in last(1)[2].inline_keyboard for b in row), "остальные кнопки без цвета")
     await press(dp, 1, f"s:{bd}")
@@ -263,8 +263,25 @@ async def scenario(tmp_path):
     await text(dp, 900, "/admin"); check("Панель Админа" in last(900)[1] and "Админка" not in last(900)[1], "панель админа так и называется")
     check("abk" in buttons(900), "у админа есть «Копия базы»")
     await text(dp, 7, "/moderator"); check("Панель старосты" in last(7)[1] and "abk" not in buttons(7), "у старосты своя панель, без копии базы")
-    await text(dp, 7, "/start"); check(any(l == "🛠 Панель старосты" for l in labels(7)), "в меню у старосты — «Панель старосты»")
-    await text(dp, 900, "/start"); check(any(l == "🛠 Панель Админа" for l in labels(900)), "в меню у админа — «Панель Админа»")
+    await text(dp, 7, "🏠 На главную"); check(any(l == "🛠 Панель старосты" for l in labels(7)), "в меню у старосты — «Панель старосты»")
+    await text(dp, 900, "🏠 На главную"); check(any(l == "🛠 Панель Админа" for l in labels(900)), "в меню у админа — «Панель Админа»")
+
+    # ===== кнопки под полем ввода =====
+    await text(dp, 2, "/start"); b1 = bottom(2)
+    check("👤 Моё" in b1 and "🏠 На главную" in b1 and any("🔥 ПнаЯВУ" in t for t in b1) and not any("🛠" in t for t in b1),
+          "студенту — предметы, «Моё» и «На главную» под полем ввода, без панели")
+    check(last(2)[2].is_persistent and last(2)[2].resize_keyboard, "клавиатура закреплена и подогнана по размеру")
+    check('"style":"danger"' in last(2)[2].model_dump_json(exclude_none=True).replace(" ", ""), "нижняя «На главную» красная")
+    await text(dp, 7, "/start"); check("🛠 Панель старосты" in bottom(7), "старосте — «Панель старосты» внизу")
+    await text(dp, 900, "/start"); check("🛠 Панель Админа" in bottom(900), "админу — «Панель Админа» внизу")
+    await text(dp, 2, "🔥 ПнаЯВУ"); check("очередь сейчас" in last(2)[1], "нижняя кнопка предмета открывает очередь")
+    await text(dp, 2, "👤 Моё"); check("Моё" in last(2)[1], "нижняя «Моё» открывает «Моё»")
+    await text(dp, 7, "🛠 Панель старосты"); check("Панель старосты" in last(7)[1], "нижняя кнопка открывает панель старосты")
+    await text(dp, 2, "🛠 Панель Админа"); check("недоступна" in last(2)[1] and not any("🛠" in t for t in bottom(2)), "студент чужую панель не откроет, клавиатуру обновили")
+    await press(dp, 2, f"sd:{bd}:1"); await press(dp, 2, f"sm:{bd}"); check("Попросить −1" in last(2)[1], "ждём причину −1")
+    await text(dp, 2, "🔥 ПнаЯВУ")
+    check("очередь сейчас" in last(2)[1], "нажатие кнопки не принимается за причину −1 (ввод сброшен)")
+    await text(dp, 2, "что-то непонятное"); check("внизу" in last(2)[1] and "🏠 На главную" in bottom(2), "непонятный текст — подсказка и свежая клавиатура")
 
     # ===== значки в списке людей =====
     await press(dp, 900, "ap"); lab = labels(900)
