@@ -17,7 +17,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 import config
 from common import (
-    btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
+    MENU_BTN, btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, works,
 )
 import logsink
@@ -28,7 +28,6 @@ log = logging.getLogger(__name__)
 
 router = Router()
 
-MENU_BTN = btn("🔙 В главное меню", "menu")
 ADMIN_BTN = btn("🛠 Панель", "adm")
 MAX_TEXT = 3800  # с запасом до лимита Telegram в 4096 символов
 

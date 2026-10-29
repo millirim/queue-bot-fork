@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 import config
 from admin import close_notices, notify_minus, notify_reviewers
 from common import (
-    btn, esc, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, set_subgroup_view,
+    MENU_BTN, btn, esc, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, set_subgroup_view,
     show, staff_kind, subgroup_buttons, subgroup_view, updated_at,
 )
 from db import Database, Student
@@ -19,10 +19,8 @@ router = Router()
 class MinusForm(StatesGroup):
     reason = State()
 
+
 # ================= вспомогательное =================
-MENU_BTN = btn("🔙 В главное меню", "menu")
-
-
 async def main_menu(db: Database, chat_id: int, student: Student | None) -> InlineKeyboardMarkup:
     """Главное меню: предметы и «Моё»; старостам и админам — их панель."""
     subjects = [btn(s.title, f"s:{s.id}") for s in await db.subjects()]

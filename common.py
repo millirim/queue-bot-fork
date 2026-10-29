@@ -168,8 +168,14 @@ def kb(*rows: list[InlineKeyboardButton]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=list(rows))
 
 
-def btn(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data)
+def btn(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
+    """Кнопка. style — цвет по Bot API 9.4: "danger" красная, "success" зелёная, "primary" синяя, None — обычная
+    (старые клиенты Telegram цвет не показывают и рисуют обычную кнопку)."""
+    return InlineKeyboardButton(text=text, callback_data=data, style=style)
+
+
+# «На главную»: одна кнопка для всех экранов, красная, чтобы выход в меню находился сразу.
+MENU_BTN = btn("🏠 На главную", "menu", style="danger")
 
 
 def rows_of(buttons: list, size: int = 2) -> list[list]:
