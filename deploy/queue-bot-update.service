@@ -1,0 +1,8 @@
+[Unit]
+Description=Обновление бота по кнопке админа (то же, что sudo queue-bot update)
+
+[Service]
+Type=oneshot
+# flock: два обновления одновременно не пойдут, второе дождётся первого.
+ExecStart=/usr/bin/flock -w 900 /run/queue-bot-update.lock /usr/local/bin/queue-bot update-from-bot
+TimeoutStartSec=900

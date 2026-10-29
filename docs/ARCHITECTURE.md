@@ -28,11 +28,12 @@ Telegram-бот «живая очередь на сдачу лаб» для **о
 | `admin.py` | Роутер Панели Админа (`/admin`) и панели старосты (`/moderator`): заявки, люди, подгруппы, сданные, рассылка, журнал, предметы, копия базы. |
 | `common.py` | Общее: права (`is_owner/is_admin/is_staff`), отправка (`show`, `send`, `send_many`, `edit_sent`), форматирование (`esc`, `kb`, `btn`, `queue_text`, `short_name`), команды меню по ролям, кулдаун «Обновить», фильтр подгруппы. |
 | `logsink.py` | Серверные логи в таблицу `server_log` (хендлер `logging` + фоновая задача). |
+| `updater.py` | Обновление бота по кнопке админа: файлы-запросы в папке данных, версия, доставка итога админу (раздел 11). |
 | `deploy/` | Установка и обслуживание на сервере (раздел 11). |
 | `tests/` | pytest (раздел 12). |
 
-Зависимости импорта (стрелка — «импортирует»): `main → admin, handlers, common, db, logsink, config`;
-`handlers → admin (close_notices, notify_*), common, db, ranking`; `admin → common, db, logsink, ranking, config`;
+Зависимости импорта (стрелка — «импортирует»): `main → admin, handlers, common, db, logsink, updater, config`;
+`handlers → admin (close_notices, notify_*), common, db, ranking`; `admin → common, db, logsink, updater, ranking, config`; `updater → common, config`;
 `common → db, ranking, config`; `db → ranking, config`; `logsink → db, config`. Циклов нет (`ranking` и `config`
 ни от кого не зависят).
 
@@ -241,6 +242,7 @@ SQLite, один файл (`DB_PATH`; на сервере `/var/lib/queue-bot/qu
 | `ab`, `abok` | рассылка: текст, отправить |
 | `aj`, `ajl:<вкладка>:<стр>`, `ajr:<вкладка>:<стр>`, `ajt` | журнал: открыть, страница, «Обновить» с кулдауном, последняя ошибка целиком. Вкладки: `a` действия, `s` события сервера, `e` предупреждения и ошибки, `x` всё |
 | `abk` | копия базы (только админ) |
+| `abu`, `abuok` | обновить бота: экран с версией и подтверждение (только админ); запрос уходит серверу, итог приходит в чат |
 | `as`, `asw`, `asa`, `asn`, `ast`, `ase`, `asek`, `asx`, `asxok` | предметы: список, карточка, добавить, название, число работ, эмодзи (`asek` — пропустить), удалить |
 
 Сообщения со старыми кнопками (например, после обновления бота) ловит `stale_callback` — открывает меню.
@@ -279,10 +281,24 @@ SQLite, один файл (`DB_PATH`; на сервере `/var/lib/queue-bot/qu
 ```
 Служба `queue-bot.service` (systemd) работает от пользователя `queuebot` без прав root; запись разрешена только в
 `/var/lib/queue-bot`. `deploy/install.sh` — установка и повторная установка; `deploy/queue-bot` — `update`, `status`,
-`logs`, `restart`, `stop`, `start`, `backup`, `config`; `deploy/common.sh` — общие функции. `queue-bot update`:
+`logs`, `restart`, `stop`, `start`, `backup`, `config`; `deploy/common.sh` — общие функции. Службы: `queue-bot.service`, `queue-bot-backup.service/.timer`,
+`queue-bot-update.service/.path`. `queue-bot update`:
 `git fetch` → бэкап базы → `git reset --hard` на `origin/<ветка>` → зависимости → перезапуск; если бот не поднялся —
 откат на прошлый коммит. Миграции базы выполняются сами при старте бота (раздел 4.3), настройки и база при обновлении
 не трогаются. Подробности и команды — в `README.md`.
+
+**Обновление по кнопке** («🔄 Обновить бота» в Панели Админа, только админ). Бот работает без прав root и себя не обновляет —
+он только оставляет запрос, остальное делает systemd от root:
+1. `updater.request(chat_id)` атомарно создаёт `/var/lib/queue-bot/update-request` (`{"chat_id": …}`);
+2. `queue-bot-update.path` (`PathExists`) запускает `queue-bot-update.service` → `flock` → `queue-bot update-from-bot`;
+3. `update_from_bot` (в `deploy/queue-bot`) читает из запроса **только число** `chat_id`, удаляет запрос, ставит
+   `update-running` и вызывает ту же `update()` (бэкап → обновление → откат, если бот не поднялся), затем пишет
+   `update-result` (JSON: `status` = `ok`/`same`/`failed`, `version`, `old_version`, `changes`, `tail`, `chat_id`);
+4. `updater.deliver_results` (фоновая задача бота, опрос каждые 3 с, в том числе сразу после перезапуска) отправляет
+   итог админу и удаляет файл. Файл `version` (`write_version` в `deploy/common.sh`) показывается в экране обновления.
+Бот ничего не исполняет сам; худшее, что может сделать запрос, — обновить бота до того, что лежит в настроенном репозитории.
+Кнопка работает, только если установлен `/etc/systemd/system/queue-bot-update.path` (его ставит `queue-bot update` и
+`install.sh`); иначе экран подскажет выполнить `sudo queue-bot update` вручную один раз.
 
 Переменные окружения (`config.py`): `BOT_TOKEN` (обязательно), `ADMIN_IDS`, `DB_PATH`, `TIMEZONE`, `GROUP_NO`
 (только для имени файла копии базы).
@@ -292,6 +308,7 @@ SQLite, один файл (`DB_PATH`; на сервере `/var/lib/queue-bot/qu
 `python -m pytest` (нужен только `pytest`; настоящий Telegram и токен не нужны).
 - `test_ranking.py` — порядок очереди и **статистическая проверка равномерности жребия**.
 - `test_db.py` — база: заявки, очередь, жребий, отмена, −1, подгруппы, миграции со старых баз, копия, логи.
+- `test_updater.py` — запросы на обновление, «идёт обновление», доставка итога.
 - `test_logsink.py` — логи в базу, скрытие токена. `test_admin_format.py` — оформление журнала, проверка эмодзи.
 - `test_scenario.py` — **сквозной сценарий** на поддельном Telegram (`tests/harness.py`): настоящие обработчики, вместо сети
   запись вызовов. Здесь проверяется то, что видит пользователь: тексты, кнопки, уведомления, права.

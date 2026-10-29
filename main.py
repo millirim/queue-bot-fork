@@ -9,6 +9,7 @@ import admin
 import config
 import handlers
 import logsink
+import updater
 from common import BASE_COMMANDS, set_commands, staff_kind
 from db import Database
 
@@ -29,6 +30,7 @@ async def main() -> None:
     db = Database(config.DB_PATH)
     await db.connect()
     flusher = asyncio.create_task(logsink.flusher(db))
+    update_watcher = None
 
     bot = Bot(
         token=config.BOT_TOKEN,
@@ -49,6 +51,7 @@ async def main() -> None:
             await set_commands(bot, student.chat_id, kind)
 
     try:
+        update_watcher = asyncio.create_task(updater.deliver_results(bot))  # итог обновления по кнопке — админу в чат
         me = await bot.get_me()
         log.info("Бот запущен: @%s, база: %s", me.username, config.DB_PATH)
         await bot.delete_webhook(drop_pending_updates=False)
@@ -56,6 +59,8 @@ async def main() -> None:
     finally:
         log.info("Бот остановлен")
         flusher.cancel()
+        if update_watcher:
+            update_watcher.cancel()
         await logsink.flush(db)  # дописать последние строки
         await bot.session.close()
         await db.close()
