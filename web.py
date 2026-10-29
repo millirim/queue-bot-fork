@@ -27,10 +27,12 @@ import logsink
 import updater
 from admin import (
     JOURNAL_PAGE, ROLE_NAMES, ROLE_NOTES, SERVER_MODES, Staff, broadcast_text, close_notices, journal_add, minus_text,
-    notify, notify_minus, request_plain, request_text, valid_emoji,
+    notify, notify_minus, publish_poll, remind_poll, remove_poll, finish_poll, clean_poll_options, request_plain, request_text,
+    valid_emoji,
 )
 from common import (
-    bottom_for, btn, check_name, esc, is_owner, kb, send, send_many, set_commands, staff_kind, web_allowed, web_role,
+    POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_owner, kb, send, send_many, set_commands, short_name,
+    staff_kind, web_allowed, web_role,
 )
 from db import ROLES, Database, Student, local_now, parse_roster
 from ranking import WANT
@@ -632,6 +634,92 @@ async def api_broadcast(request: web.Request) -> web.Response:
     return web.json_response({"sent": sent, "total": len(chat_ids)})
 
 
+# ================= голосования =================
+async def poll_json(db: Database, v: Viewer, poll) -> dict:
+    """Голосование глазами смотрящего. Цифры видны админу, проголосовавшему и когда голосование закрыто; кто за что — никому."""
+    members = len(await db.member_chats())
+    mine = await db.my_vote(poll.id, v.student.id) if v.student else None
+    admin = v.at_least("admin")
+    show_counts = admin or mine is not None or poll.closed
+    counts = await db.poll_counts(poll.id) if show_counts else {}
+    data = {
+        "id": poll.id, "question": poll.question, "closed": poll.closed, "created_at": poll.created_at, "created_by": poll.created_by,
+        "options": [{"id": oid, "text": text, "count": counts.get(oid, 0) if show_counts else None} for oid, text in poll.options],
+        "voted": sum(counts.values()) if show_counts else None, "members": members, "mine": mine,
+        "can_vote": v.student is not None and not poll.closed,
+    }
+    if admin:
+        data["waiting"] = [short_name(s.name) for s in await db.poll_nonvoters(poll.id)]
+    return data
+
+
+async def load_poll(request: web.Request, db: Database):
+    poll = await db.get_poll(int_arg(request, "pid"))
+    if poll is None:
+        raise Fail("Такого голосования больше нет", 404)
+    return poll
+
+
+async def api_polls(request: web.Request) -> web.Response:
+    v = await need(request)
+    db = db_of(request)
+    return web.json_response([await poll_json(db, v, p) for p in await db.polls()])
+
+
+async def api_poll_add(request: web.Request) -> web.Response:
+    v = await need(request, "admin")
+    db = db_of(request)
+    data = await body(request)
+    question = " ".join(str(data.get("question", "")).split())
+    options = clean_poll_options(data.get("options") if isinstance(data.get("options"), list) else [])
+    if not question or len(question) > 200:
+        raise Fail("Напиши вопрос — до 200 символов")
+    if options is None:
+        raise Fail(f"Нужно от 2 до {POLL_MAX_OPTIONS} разных вариантов, каждый до {POLL_OPTION_LEN} символов")
+    poll, sent, total = await publish_poll(bot_of(request), db, v.staff, question, options, " · веб")
+    return web.json_response({"poll": await poll_json(db, v, poll), "sent": sent, "total": total})
+
+
+async def api_poll_vote(request: web.Request) -> web.Response:
+    v = await need_student(request)
+    db = db_of(request)
+    poll = await load_poll(request, db)
+    try:
+        option = int((await body(request)).get("option"))
+    except (TypeError, ValueError):
+        raise Fail("Выбери вариант")
+    result = await db.vote(poll.id, v.student.id, option)
+    if result == "closed":
+        raise Fail("Голосование закрыто", 409)
+    if result == "none":
+        raise Fail("Такого варианта нет", 404)
+    return web.json_response(await poll_json(db, v, poll))
+
+
+async def api_poll_remind(request: web.Request) -> web.Response:
+    v = await need(request, "admin")
+    db = db_of(request)
+    poll = await load_poll(request, db)
+    if poll.closed:
+        raise Fail("Голосование закрыто", 409)
+    sent, total = await remind_poll(bot_of(request), db, v.staff, poll, " · веб")
+    return web.json_response({"sent": sent, "total": total})
+
+
+async def api_poll_close(request: web.Request) -> web.Response:
+    v = await need(request, "admin")
+    db = db_of(request)
+    poll = await finish_poll(bot_of(request), db, v.staff, await load_poll(request, db), " · веб")
+    return web.json_response(await poll_json(db, v, poll))
+
+
+async def api_poll_delete(request: web.Request) -> web.Response:
+    v = await need(request, "admin")
+    db = db_of(request)
+    await remove_poll(db, v.staff, await load_poll(request, db), " · веб")
+    return web.json_response({"ok": True})
+
+
 # ================= журнал =================
 async def api_journal(request: web.Request) -> web.Response:
     """Вкладки как в боте: a — действия, s — сервер, e — ошибки, x — всё (s/e/x только админу)."""
@@ -809,6 +897,12 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_post("/api/queue/{sid:\\d+}/undo", api_undo)
     r.add_post("/api/queue/{sid:\\d+}/minus", api_ask_minus)
     r.add_post("/api/progress/{sid:\\d+}/{pid:\\d+}", api_progress)
+    r.add_get("/api/polls", api_polls)
+    r.add_post("/api/polls", api_poll_add)
+    r.add_post("/api/polls/{pid:\\d+}/vote", api_poll_vote)
+    r.add_post("/api/polls/{pid:\\d+}/remind", api_poll_remind)
+    r.add_post("/api/polls/{pid:\\d+}/close", api_poll_close)
+    r.add_delete("/api/polls/{pid:\\d+}", api_poll_delete)
     r.add_get("/api/requests", api_requests)
     r.add_post("/api/requests/reg/{chat_id:\\d+}", api_review)
     r.add_post("/api/requests/minus/{mid:\\d+}", api_minus_review)

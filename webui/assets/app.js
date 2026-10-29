@@ -27,6 +27,7 @@ const ICONS = {
   hand: '<path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V11M11 10V4.5a1.5 1.5 0 0 1 3 0V11M14 10.5V6a1.5 1.5 0 0 1 3 0v7a7 7 0 0 1-7 7h-.5a6 6 0 0 1-4.9-2.5L2.8 14a1.5 1.5 0 0 1 2.4-1.8L8 15"/>',
   undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
+  vote: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
 };
 
@@ -459,6 +460,7 @@ const NAV = [
     { id: "overview", label: "Обзор", ic: "home", min: "user" },
     { id: "queues", label: "Очереди", ic: "list", min: "user" },
     { id: "my", label: "Моё", ic: "user", min: "user", student: true },
+    { id: "polls", label: "Голосования", ic: "vote", min: "user" },
   ] },
   { group: "Управление", items: [
     { id: "requests", label: "Заявки", ic: "inbox", min: "starosta", badge: true },
@@ -1204,6 +1206,73 @@ PAGES.journal = async (page, _, token) => {
 };
 
 // ================= предметы =================
+PAGES.polls = async (page, _, token) => {
+  page.append(pageHead("Голосования"), loadingCard());
+  let list = await api("/api/polls");
+  if (token !== state.route) return;
+  const admin = can("admin");
+
+  const bars = (p) => h("div", { class: "poll-options" }, p.options.map((o) => {
+    const share = p.voted ? (o.count || 0) / p.voted : 0;
+    const mine = p.mine === o.id;
+    const vote = p.can_vote ? button(mine ? "Твой голос" : (p.mine ? "Выбрать" : "Голосовать"), { kind: "sm" + (mine ? "" : " primary"), onClick: async () => {
+      const upd = await api(`/api/polls/${p.id}/vote`, { method: "POST", body: { option: o.id } });
+      list = list.map((x) => (x.id === p.id ? upd : x)); draw(); toast("Голос принят");
+    } }) : null;
+    if (vote && mine) vote.disabled = true;
+    return h("div", { class: "poll-option" + (mine ? " poll-mine" : "") },
+      h("div", { class: "poll-row" }, h("span", { class: "poll-text", text: (mine ? "✅ " : "") + o.text }),
+        o.count == null ? null : h("span", { class: "num faint", text: `${o.count} · ${Math.round(share * 100)}%` }), vote),
+      o.count == null ? null : (() => { const bar = h("div", { class: "bar wide" }, h("i")); bar.firstChild.style.width = `${Math.round(share * 100)}%`; return bar; })());
+  }));
+
+  const card = (p) => h("div", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", { text: p.question }),
+      h("div", { class: "right" }, h("span", { class: "pill " + (p.closed ? "" : "ok"), text: p.closed ? "закрыто" : "открыто" }))),
+    h("div", { class: "card-body" }, bars(p),
+      p.voted == null ? h("p", { class: "faint", text: "Результаты появятся после твоего голоса. Голосование анонимное." })
+        : h("p", { class: "faint", text: `Проголосовали: ${p.voted} из ${p.members}. Анонимно: видно цифры, но не кто за что.` + (p.can_vote && p.mine != null ? " Передумал — выбери другой вариант." : "") }),
+      admin && p.waiting && p.waiting.length ? h("p", { class: "faint" }, h("strong", { text: `Ещё не проголосовали (${p.waiting.length}): ` }), p.waiting.join(", ")) : null),
+    admin ? h("div", { class: "card-foot" },
+      p.closed ? null : button("Напомнить", { kind: "sm", ic: "send", onClick: async () => {
+        const r = await api(`/api/polls/${p.id}/remind`, { method: "POST", body: {} }); toast(`Напомнил: ${r.sent} из ${r.total}`);
+      } }),
+      p.closed ? null : button("Закрыть", { kind: "sm", ic: "check", onClick: async () => {
+        if (!(await confirmDialog("Закрыть голосование", "Голоса больше не принимаются, всем в боте придут итоги.", "Закрыть"))) return;
+        const upd = await api(`/api/polls/${p.id}/close`, { method: "POST", body: {} });
+        list = list.map((x) => (x.id === p.id ? upd : x)); draw(); toast("Закрыто, итоги разосланы");
+      } }),
+      button("Удалить", { kind: "sm danger", ic: "trash", onClick: async () => {
+        if (!(await confirmDialog("Удалить голосование", "Вместе со всеми голосами. Это нельзя отменить.", "Удалить", true))) return;
+        await api(`/api/polls/${p.id}`, { method: "DELETE" }); list = list.filter((x) => x.id !== p.id); draw(); toast("Удалено");
+      } })) : null);
+
+  const create = async () => {
+    const question = h("input", { class: "input", maxlength: "200", placeholder: "Например, Где сдаём в пятницу?" });
+    const box = h("div", { class: "poll-inputs" });
+    const addOption = () => {
+      if (box.children.length >= 8) return;
+      box.append(h("input", { class: "input", maxlength: "60", placeholder: `Вариант ${box.children.length + 1}` }));
+    };
+    addOption(); addOption();
+    const more = button("Ещё вариант", { kind: "sm", ic: "plus", onClick: () => { addOption(); box.lastChild.focus(); } });
+    await dialog({ title: "Новое голосование", body: [h("label", { class: "field-label" }, "Вопрос", question),
+      h("label", { class: "field-label" }, "Варианты ответа (от 2 до 8)"), box, more,
+      h("p", { class: "faint", text: "Сообщение с кнопками придёт всем в боте. Голосование анонимное." })],
+      actions: [{ label: "Отмена", value: false }, { label: "Отправить группе", kind: "primary", onClick: async () => {
+        const options = [...box.children].map((i) => i.value).filter((t) => t.trim());
+        const r = await api("/api/polls", { method: "POST", body: { question: question.value, options } });
+        list = [r.poll, ...list]; draw(); toast(`Отправлено: ${r.sent} из ${r.total}`); return true;
+      } }] });
+  };
+
+  const draw = () => fill(page,
+    pageHead("Голосования", { sub: admin ? "Вопрос с вариантами ответа для всей группы. Анонимно; пока открыто, голос можно поменять."
+      : "Голосуй за варианты. Анонимно: никто не видит, кто как проголосовал.",
+      actions: admin ? [button("Создать голосование", { kind: "primary", ic: "plus", onClick: create })] : [] }),
+    list.length ? h("div", { class: "stack" }, list.map(card)) : h("div", { class: "card" }, emptyState("Голосований пока нет", admin ? "Создай первое — оно сразу уйдёт группе в Telegram." : "Когда админ создаст голосование, оно появится здесь.")));
+  draw();
+};
 PAGES.subjects = async (page, _, token) => {
   page.append(pageHead("Предметы"), loadingCard());
   let list = await api("/api/subjects");

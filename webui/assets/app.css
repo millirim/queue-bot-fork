@@ -498,3 +498,12 @@ pre.log { margin: 0; padding: 16px; font: 12.5px/1.55 var(--mono); white-space: 
 /* Мини-приложение Telegram: отступы под вырезы и жестовую полосу телефона */
 html.tg body { padding-top: env(safe-area-inset-top); }
 html.tg .status { padding-bottom: env(safe-area-inset-bottom); }
+
+/* Голосования */
+.poll-options { display: grid; gap: 14px; }
+.poll-row { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+.poll-text { flex: 1; overflow-wrap: anywhere; }
+.poll-mine .poll-text { font-weight: 600; }
+.bar.wide { max-width: none; height: 6px; }
+.poll-inputs { display: grid; gap: 8px; margin: 6px 0 10px; }
+.stack { display: grid; gap: 16px; }
