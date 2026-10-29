@@ -898,8 +898,9 @@ async def show_update(cb: CallbackQuery, ack: bool = True):
     version = f"Сейчас: <code>{esc(updater.current_version())}</code>"
     if not updater.available():
         await show(
-            cb, f"🔄 <b>Обновить бота</b>\n{version}\n\n⚠️ На сервере не включено обновление по кнопке. Один раз выполни "
-                "там <code>sudo queue-bot update</code> — после него кнопка заработает.",
+            cb, f"🔄 <b>Обновить бота</b>\n{version}\n\n⚠️ На сервере ещё не включено обновление по кнопке. Выполни там "
+                "<code>sudo queue-bot update</code> (после обновления со старой версии — два раза подряд): "
+                "во второй раз он включит нужные службы, и кнопка заработает.",
             kb([ADMIN_BTN]), ack,
         )
     elif updater.busy():

@@ -50,6 +50,9 @@ update() {
     old=$(git rev-parse HEAD)
     new=$(git rev-parse '@{u}')
     if [[ $old == "$new" ]]; then
+        # Код тот же, но службы приводим в порядок: так после обновления со старой версии команды queue-bot
+        # (она не знала про новые службы) второй запуск update включает всё недостающее, например кнопку в боте.
+        apply_code
         echo "Уже последняя версия: $(version)"
         return
     fi
@@ -89,7 +92,8 @@ except Exception:
     print("")' "$req" 2>/dev/null || true)
     rm -f "$req"                        # сразу: иначе systemd запустил бы обновление снова
     : > "$running"; chown "$APP_USER:$APP_USER" "$running"
-    trap 'rm -f "$running"' EXIT
+    # Путь подставляется сразу, в двойных кавычках: к концу работы локальной переменной $running уже не будет.
+    trap "rm -f '$running'" EXIT
 
     old=$(version)
     set +e
