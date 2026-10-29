@@ -6,6 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 import admin
+import bottom
 import config
 import handlers
 import logsink
@@ -39,6 +40,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp["db"] = db
     # Панель админа первой: в handlers последними стоят запасные обработчики, которые ловят всё подряд.
+    dp.include_router(bottom.router)  # самым первым: нажатие нижней кнопки не должно попасть в ввод текста
     dp.include_router(admin.router)
     dp.include_router(handlers.router)
 

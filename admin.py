@@ -13,11 +13,11 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReplyKeyboardRemove
 
 import config
 from common import (
-    MENU_BTN, btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
+    MENU_BTN, bottom_for, btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, works,
 )
 import logsink
@@ -265,8 +265,8 @@ async def cb_review(cb: CallbackQuery, db: Database):
         else:
             await journal_add(db, staff, f"заявка принята: {request_plain(request)}")
             note = f"\n\nТвоя роль — <b>{ROLE_NAMES[student.role]}</b>. {ROLE_NOTES[student.role]}" if student.role != "user" else ""
-            await send(cb.bot, chat_id, f"✅ <b>Заявку приняли!</b> Ты — {esc(student.name)}.{note}\n/help — как всё устроено.",
-                       kb([btn("📋 Открыть меню", "menu")]))
+            await send(cb.bot, chat_id, f"✅ <b>Заявку приняли!</b> Ты — {esc(student.name)}.{note}\n/help — как всё устроено.\n\nКнопки меню — внизу, под полем ввода 👇",
+                       await bottom_for(db, chat_id))
             await set_commands(cb.bot, chat_id, staff_kind(chat_id, student))
             await cb.answer("Принята")
             result = f"✅ принята ({esc(staff.signature)})"
@@ -540,7 +540,8 @@ async def cb_person_role(cb: CallbackQuery, db: Database):
     if s.linked:
         await set_commands(cb.bot, s.chat_id, staff_kind(s.chat_id, await db.get_student(s.id)))
     await journal_add(db, staff, f"роль {s.name}: {ROLE_NAMES[s.role]} → {ROLE_NAMES[role]}")
-    await notify(cb.bot, s, f"Твоя роль теперь — <b>{ROLE_NAMES[role]}</b> ({esc(staff.signature)}).\n{ROLE_NOTES[role]}")
+    await notify(cb.bot, s, f"Твоя роль теперь — <b>{ROLE_NAMES[role]}</b> ({esc(staff.signature)}).\n{ROLE_NOTES[role]}",
+                 await bottom_for(db, s.chat_id))
     await cb.answer(f"Теперь {ROLE_NAMES[role]}")
     await show_person(cb, db, staff, await db.get_student(s.id), ack=False)
 
@@ -564,6 +565,7 @@ async def cb_person_unlink_ok(cb: CallbackQuery, db: Database):
     if chat_id:
         await set_commands(cb.bot, chat_id, "admin" if is_owner(chat_id) else None)
         await journal_add(db, staff, f"Telegram отвязан от {s.name}")
+        await send(cb.bot, chat_id, "⌨️ Кнопки под полем ввода убраны.", ReplyKeyboardRemove())
         await send(cb.bot, chat_id, f"🔓 Твой Telegram отвязан от «{esc(s.name)}» ({esc(staff.signature)}). "
                                     "Выбери себя из списка заново.", kb([btn("📝 Выбрать себя", "reg")]))
     await cb.answer("Отвязано")
@@ -594,7 +596,8 @@ async def cb_person_active(cb: CallbackQuery, db: Database):
         await set_commands(cb.bot, s.chat_id, staff_kind(s.chat_id, await db.get_student(s.id)))
     await journal_add(db, staff, f"{s.name} {'возвращён(а) в группу' if active else 'убран(а) из группы'}")
     await notify(cb.bot, s, "↩️ Тебя вернули в группу — бот снова доступен." if active
-                 else f"🗂 Тебя убрали из группы в боте ({esc(staff.signature)}). Если это ошибка — напиши старосте.")
+                 else f"🗂 Тебя убрали из группы в боте ({esc(staff.signature)}). Если это ошибка — напиши старосте.",
+                 await bottom_for(db, s.chat_id))
     await cb.answer("Готово")
     await show_person(cb, db, staff, await db.get_student(s.id), ack=False)
 

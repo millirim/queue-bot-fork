@@ -9,11 +9,12 @@ from datetime import datetime
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import (
-    BotCommand, BotCommandScopeChat, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
+    BotCommand, BotCommandScopeChat, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove,
 )
 
 import config
-from db import Student, Subject
+from db import Database, Student, Subject
 from ranking import WANT, Row
 
 log = logging.getLogger(__name__)
@@ -124,7 +125,7 @@ async def show(
         await target.answer(text, reply_markup=markup)
 
 
-async def send(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> Message | None:
+async def send(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None) -> Message | None:
     """Отправленное сообщение или None, если не дошло."""
     for _ in range(3):
         try:
@@ -176,6 +177,32 @@ def btn(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
 
 # «На главную»: одна кнопка для всех экранов, красная, чтобы выход в меню находился сразу.
 MENU_BTN = btn("🏠 На главную", "menu", style="danger")
+
+
+# --- кнопки под полем ввода (постоянная клавиатура) ---
+BTN_MY = "👤 Моё"
+BTN_HOME = "🏠 На главную"
+
+
+def panel_button(kind: str) -> str:
+    return f"🛠 {panel_name(kind)}"
+
+
+def bottom_menu(subjects: list[Subject], kind: str | None) -> ReplyKeyboardMarkup:
+    """Постоянные кнопки под полем ввода: предметы, «Моё», панель (старостам и админам) и «На главную».
+    Нажатие приходит боту обычным сообщением — его ловит bottom.py."""
+    rows = rows_of([KeyboardButton(text=s.title) for s in subjects])
+    rows.append([KeyboardButton(text=BTN_MY)] + ([KeyboardButton(text=panel_button(kind))] if kind else []))
+    rows.append([KeyboardButton(text=BTN_HOME, style="danger")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True, input_field_placeholder="Выбери предмет")
+
+
+async def bottom_for(db: Database, chat_id: int) -> ReplyKeyboardMarkup | ReplyKeyboardRemove:
+    """Актуальная клавиатура для человека; тем, кого нет в списке группы, — убрать её."""
+    student = await db.student_by_chat(chat_id)
+    if student is None:
+        return ReplyKeyboardRemove()
+    return bottom_menu(await db.subjects(), staff_kind(chat_id, student))
 
 
 def rows_of(buttons: list, size: int = 2) -> list[list]:
