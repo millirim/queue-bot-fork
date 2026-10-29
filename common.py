@@ -10,7 +10,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import (
     BotCommand, BotCommandScopeChat, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
-    ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove, MenuButtonCommands, MenuButtonWebApp, WebAppInfo,
 )
 
 import config
@@ -81,9 +81,22 @@ def staff_kind(chat_id: int, student: Student | None) -> str | None:
     return "moderator" if student and student.starosta else None
 
 
+async def set_menu_button(bot: Bot, chat_id: int, role: str | None) -> None:
+    """Кнопка рядом с полем ввода: «Панель» (мини-приложение), если этой роли открыта веб-панель по https; иначе обычная."""
+    try:
+        if web_allowed(role) and config.WEB_URL.startswith("https://"):
+            button = MenuButtonWebApp(text="Панель", web_app=WebAppInfo(url=config.WEB_URL))
+        else:
+            button = MenuButtonCommands()
+        await bot.set_chat_menu_button(chat_id=chat_id, menu_button=button)
+    except TelegramAPIError as e:
+        log.info("Кнопка меню для %s не обновлена: %s", chat_id, e)
+
+
 async def set_commands(bot: Bot, chat_id: int, kind: str | None) -> None:
     """Команды в меню Telegram для одного человека; None — обычные, как у всех."""
     scope = BotCommandScopeChat(chat_id=chat_id)
+    await set_menu_button(bot, chat_id, None if kind is None else "admin" if kind == "admin" else "starosta")
     try:
         if kind is None:
             await bot.delete_my_commands(scope=scope)

@@ -6,10 +6,14 @@
 Админ может посмотреть панель глазами старосты или студента (заголовок X-View-As) — это только понижение прав.
 Действия пишутся в тот же журнал (с пометкой «веб»), а людям приходят те же уведомления в Telegram.
 """
+import hashlib
+import hmac
+import json
 import logging
 import os
 import sys
 import time
+from urllib.parse import parse_qsl
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -164,13 +168,44 @@ async def api_ping(request: web.Request) -> web.Response:
                               "uptime": now - STARTED})
 
 
+INIT_MAX_AGE = 24 * 3600  # initData из Telegram считается свежей сутки
+
+
+def init_data_user(init_data: str, bot_token: str, max_age: int = INIT_MAX_AGE) -> int | None:
+    """chat_id человека из initData мини-приложения Telegram или None, если подпись или срок не сошлись.
+    Подпись: HMAC-SHA256 от строки «ключ=значение» (по алфавиту, без hash) с ключом HMAC("WebAppData", токен бота)."""
+    try:
+        fields = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=True))
+    except ValueError:
+        return None
+    given = fields.pop("hash", "")
+    check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+    secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), given):
+        return None
+    try:
+        if time.time() - int(fields["auth_date"]) > max_age:
+            return None
+        user_id = json.loads(fields["user"])["id"]
+    except (KeyError, ValueError, TypeError):
+        return None
+    return user_id if isinstance(user_id, int) else None
+
+
 async def api_login(request: web.Request) -> web.Response:
-    """Одноразовая ссылка из бота → сессия. Обмен — POST по кнопке, чтобы превью ссылок не съели токен."""
+    """Вход: одноразовая ссылка из бота (POST по кнопке, чтобы превью ссылок не съели токен) или initData
+    мини-приложения Telegram (подпись проверяем токеном бота) → сессия."""
     db = db_of(request)
-    token = str((await body(request)).get("token", ""))
-    chat_id = await db.web_check(token, "login", consume=True) if token else None
-    if chat_id is None:
-        raise Fail("Ссылка устарела или уже использована — попроси у бота новую: /web", 401)
+    data = await body(request)
+    if init_data := str(data.get("initData", "")):
+        chat_id = init_data_user(init_data, config.BOT_TOKEN)
+        if chat_id is None:
+            raise Fail("Telegram не подтвердил вход — закрой и открой панель из бота заново", 401)
+    else:
+        token = str(data.get("token", ""))
+        chat_id = await db.web_check(token, "login", consume=True) if token else None
+        if chat_id is None:
+            raise Fail("Ссылка устарела или уже использована — попроси у бота новую: /web", 401)
     student = await db.student_by_chat(chat_id)
     if not web_allowed(web_role(chat_id, student)):
         raise Fail("Веб-панель пока доступна только админам", 403)

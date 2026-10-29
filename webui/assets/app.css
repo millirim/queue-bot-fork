@@ -494,3 +494,7 @@ pre.log { margin: 0; padding: 16px; font: 12.5px/1.55 var(--mono); white-space: 
   .finder-bar { flex-direction: column; }
   h1 { font-size: 19px; }
 }
+
+/* Мини-приложение Telegram: отступы под вырезы и жестовую полосу телефона */
+html.tg body { padding-top: env(safe-area-inset-top); }
+html.tg .status { padding-bottom: env(safe-area-inset-bottom); }

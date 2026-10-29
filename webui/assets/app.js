@@ -1330,9 +1330,58 @@ async function boot() {
   refreshBadge();
 }
 
+// ================= мини-приложение Telegram =================
+// Бот открывает панель кнопкой «Открыть» / кнопкой меню: Telegram кладёт подписанные данные в адрес (#tgWebAppData=…).
+// SDK telegram.org не подключаем (страница ему не доверяет) — нужные события шлём сами, как это делает SDK.
+const tg = (() => {
+  const params = new URLSearchParams(location.hash.slice(1));
+  const initData = params.get("tgWebAppData");
+  if (!initData) return null;
+  history.replaceState(null, "", location.pathname + location.search);  // дальше адрес — обычные маршруты #/…
+  const send = (name, data) => {
+    try {
+      if (window.TelegramWebviewProxy) window.TelegramWebviewProxy.postEvent(name, JSON.stringify(data || {}));
+      else if (window.parent !== window) window.parent.postMessage(JSON.stringify({ eventType: name, eventData: data || {} }), "https://web.telegram.org");
+    } catch (e) { /* вне Telegram события не нужны */ }
+  };
+  let bg = null;
+  try { bg = JSON.parse(params.get("tgWebAppThemeParams") || "{}").bg_color || null; } catch (e) { /* без темы Telegram */ }
+  return { initData, send, bg };
+})();
+
+function setupTelegram() {
+  if (!tg) return;
+  document.documentElement.classList.add("tg");
+  tg.send("web_app_ready");
+  tg.send("web_app_expand");
+  tg.send("web_app_setup_swipe_behavior", { allow_vertical_swipe: false });  // свайп вниз не закрывает панель
+  let saved = null;
+  try { saved = localStorage.getItem("qb-theme"); } catch (e) { /* не страшно */ }
+  if (tg.bg && (!saved || saved === "system")) {  // тема как в Telegram
+    const n = parseInt(tg.bg.slice(1), 16);
+    const light = ((n >> 16) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 1000 > 140;
+    document.documentElement.setAttribute("data-theme", light ? "light" : "dark");
+  }
+}
+
+async function start() {
+  setupTelegram();
+  if (tg) {
+    try {
+      await api("/api/login", { method: "POST", body: { initData: tg.initData } });
+    } catch (e) {
+      document.getElementById("app").replaceChildren(h("div", { class: "login" }, h("div", { class: "card" }, h("div", { class: "card-body" },
+        h("h1", { text: "Панель недоступна" }), h("p", { class: "muted", text: e.message }),
+        button("Попробовать снова", { kind: "primary", onClick: () => location.reload() })))));
+      return;
+    }
+  }
+  if (location.pathname === "/login") renderLogin();
+  else boot();
+}
+
 buildStatus();
 pingOnce();
 setInterval(pingOnce, 2000);
 requestAnimationFrame(tick);
-if (location.pathname === "/login") renderLogin();
-else boot();
+start();

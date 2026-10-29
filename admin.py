@@ -13,7 +13,9 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, LinkPreviewOptions, Message, ReplyKeyboardRemove
+from aiogram.types import (
+    BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message, ReplyKeyboardRemove, WebAppInfo,
+)
 
 import config
 from common import (
@@ -948,6 +950,13 @@ async def cb_update_confirm(cb: CallbackQuery, db: Database):
 WEB_LOGIN_TTL = 10 * 60  # сколько живёт ссылка для входа, секунд; она одноразовая
 
 
+def web_app_button() -> InlineKeyboardMarkup | None:
+    """Кнопка «Открыть в Telegram» — панель как мини-приложение (нужен https-адрес: http Telegram не принимает)."""
+    if not config.WEB_URL.startswith("https://"):
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📱 Открыть в Telegram", web_app=WebAppInfo(url=config.WEB_URL))]])
+
+
 async def send_web_link(target: Message | CallbackQuery, db: Database) -> None:
     """Одноразовая ссылка для входа в веб-панель (web.py) — тем, кому можно по WEB_ROLES."""
     chat_id = target.from_user.id
@@ -966,6 +975,7 @@ async def send_web_link(target: Message | CallbackQuery, db: Database) -> None:
         f"🌐 <b>Веб-панель</b>\n\n<a href=\"{esc(url)}\">Войти</a> — ссылка одноразовая и действует "
         f"{WEB_LOGIN_TTL // 60} минут. Никому её не пересылай: по ней входят под тобой.\n\n<code>{esc(url)}</code>",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
+        reply_markup=web_app_button(),
     )
     if isinstance(target, CallbackQuery):
         await target.answer()

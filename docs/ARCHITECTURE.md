@@ -333,7 +333,7 @@ SQLite, один файл (`DB_PATH`; на сервере `/var/lib/queue-bot/qu
 - `test_logsink.py` — логи в базу, скрытие токена. `test_admin_format.py` — оформление журнала, проверка эмодзи.
 - `test_scenario.py` — **сквозной сценарий** на поддельном Telegram (`tests/harness.py`): настоящие обработчики, вместо сети
   запись вызовов. Здесь проверяется то, что видит пользователь: тексты, кнопки, уведомления, права.
-- `test_web.py` — веб-панель на настоящем aiohttp-сервере: одноразовая ссылка, роли, CSRF, «смотреть как», действия
+- `test_web.py` — веб-панель на настоящем aiohttp-сервере: одноразовая ссылка, вход из мини-приложения (подпись initData), роли, CSRF, «смотреть как», действия
   с журналом и уведомлениями, предметы, копия базы, выход.
 - `test_docs.py` — документация не отстаёт от кода.
 
@@ -364,6 +364,14 @@ SQLite, один файл (`DB_PATH`; на сервере `/var/lib/queue-bot/qu
 (`web_sessions.kind='login'`, 10 минут, без превью). Страница `/login` **не** входит сама: вход — POST `/api/login`
 по кнопке, чтобы превью ссылок и сканеры не потратили одноразовый токен. Ответ ставит cookie `qb_session`
 (`HttpOnly`, `SameSite=Strict`, `Secure` при `https` в `WEB_URL`, 30 дней).
+
+**Мини-приложение Telegram.** При `https` в `WEB_URL` бот шлёт кнопку `web_app` («📱 Открыть в Telegram», `admin.web_app_button`)
+и ставит тем, кому разрешена панель, кнопку меню чата «Панель» (`common.set_menu_button`, вызывается из `set_commands`).
+Telegram открывает адрес с `#tgWebAppData=<initData>`; `app.js` забирает её из адреса, убирает хэш и шлёт POST `/api/login`
+с `{"initData": …}`. `web.init_data_user` проверяет подпись (HMAC-SHA256, ключ `HMAC("WebAppData", BOT_TOKEN)`) и свежесть
+`auth_date` (сутки), берёт `user.id`, дальше те же проверки роли и та же cookie. SDK `telegram.org` не подключается
+(CSP `script-src 'self'`): нужные события (`web_app_ready/expand`, запрет закрытия свайпом) страница шлёт сама через
+`TelegramWebviewProxy`. В Telegram Web (iframe) не работает: `frame-ancestors 'none'` и cookie `SameSite=Strict`.
 
 **Права** — на каждом запросе заново (`web.viewer` → `need(request, 'user'|'starosta'|'admin')`), как `need_staff`
 в `admin.py`: роль сняли в боте — следующий запрос получит 403. Студенческие действия (`need_student`) — только тому,
