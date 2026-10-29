@@ -793,6 +793,50 @@ def poll_title(poll: Poll, voted: int | None = None, members: int | None = None)
     return f"{'🔒' if poll.closed else '🟢'} {poll.question[:32]}{done}"
 
 
+def clean_poll_options(lines: list[str]) -> list[str] | None:
+    """Варианты без пустых и повторов; None, если их не 2–POLL_MAX_OPTIONS или какой-то длиннее POLL_OPTION_LEN."""
+    options = list(dict.fromkeys(" ".join(str(line).split()) for line in lines if str(line).strip()))
+    if not 2 <= len(options) <= POLL_MAX_OPTIONS or any(len(o) > POLL_OPTION_LEN for o in options):
+        return None
+    return options
+
+
+# Действия над голосованием общие для бота и веб-панели; suffix — пометка в журнале («· веб»).
+async def publish_poll(bot: Bot, db: Database, staff: Staff, question: str, options: list[str], suffix: str = "") -> tuple[Poll, int, int]:
+    """Создаёт голосование и рассылает всей группе в боте. Возвращает (голосование, дошло, всего)."""
+    poll = await db.get_poll(await db.create_poll(question, options, staff.signature))
+    chat_ids = await db.member_chats()
+    sent = await send_many(bot, chat_ids, poll_text(poll, None, len(chat_ids)), poll_markup(poll))
+    await journal_add(db, staff, f"голосование #{poll.id} (дошло {sent} из {len(chat_ids)}): {poll.question[:80]}{suffix}")
+    return poll, sent, len(chat_ids)
+
+
+async def remind_poll(bot: Bot, db: Database, staff: Staff, poll: Poll, suffix: str = "") -> tuple[int, int]:
+    """Напоминает не голосовавшим. Возвращает (дошло, кому слали)."""
+    waiting = [s.chat_id for s in await db.poll_nonvoters(poll.id)]
+    members = len(await db.member_chats())
+    sent = await send_many(bot, waiting, "🔔 Ты ещё не проголосовал(а):\n\n" + poll_text(poll, None, members), poll_markup(poll))
+    await journal_add(db, staff, f"напоминание о голосовании #{poll.id}: дошло {sent} из {len(waiting)}{suffix}")
+    return sent, len(waiting)
+
+
+async def finish_poll(bot: Bot, db: Database, staff: Staff, poll: Poll, suffix: str = "") -> Poll:
+    """Закрывает голосование и рассылает итоги всем в боте."""
+    if poll.closed:
+        return poll
+    await db.close_poll(poll.id)
+    poll = await db.get_poll(poll.id)
+    await journal_add(db, staff, f"голосование #{poll.id} закрыто: {poll.question[:80]}{suffix}")
+    chat_ids = await db.member_chats()
+    await send_many(bot, chat_ids, poll_text(poll, await db.poll_counts(poll.id), len(chat_ids)))
+    return poll
+
+
+async def remove_poll(db: Database, staff: Staff, poll: Poll, suffix: str = "") -> None:
+    await db.delete_poll(poll.id)
+    await journal_add(db, staff, f"голосование #{poll.id} удалено: {poll.question[:80]}{suffix}")
+
+
 @router.callback_query(F.data == "av")
 async def cb_polls(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
@@ -839,8 +883,8 @@ async def admin_poll_options(msg: Message, state: FSMContext, db: Database):
     if not await need_staff(msg, db, admin_only=True):
         await state.clear()
         return
-    options = list(dict.fromkeys(" ".join(line.split()) for line in msg.text.splitlines() if line.strip()))
-    if not 2 <= len(options) <= POLL_MAX_OPTIONS or any(len(o) > POLL_OPTION_LEN for o in options):
+    options = clean_poll_options(msg.text.splitlines())
+    if options is None:
         await msg.answer(f"⚠️ Нужно от 2 до {POLL_MAX_OPTIONS} разных вариантов, по одному в строке, каждый до {POLL_OPTION_LEN} символов.")
         return
     await state.update_data(options=options)
@@ -862,12 +906,8 @@ async def cb_poll_send(cb: CallbackQuery, state: FSMContext, db: Database):
         return
     await state.clear()
     await cb.answer("Отправляю…")
-    poll_id = await db.create_poll(data["question"], data["options"], staff.signature)
-    poll = await db.get_poll(poll_id)
-    chat_ids = await db.member_chats()
-    sent = await send_many(cb.bot, chat_ids, poll_text(poll, None, len(chat_ids)), poll_markup(poll))
-    await journal_add(db, staff, f"голосование #{poll_id} (дошло {sent} из {len(chat_ids)}): {poll.question[:80]}")
-    await show(cb, f"🗳 Голосование отправлено: {sent} из {len(chat_ids)}.", kb([btn("📊 Результаты", f"av:{poll_id}")], [ADMIN_BTN]), ack=False)
+    poll, sent, total = await publish_poll(cb.bot, db, staff, data["question"], data["options"])
+    await show(cb, f"🗳 Голосование отправлено: {sent} из {total}.", kb([btn("📊 Результаты", f"av:{poll.id}")], [ADMIN_BTN]), ack=False)
 
 
 async def show_poll_card(cb: CallbackQuery, db: Database, poll: Poll, ack: bool = True):
@@ -906,11 +946,8 @@ async def cb_poll_remind(cb: CallbackQuery, db: Database):
     if poll.closed:
         await cb.answer("Голосование закрыто", show_alert=True)
         return
-    waiting = [s.chat_id for s in await db.poll_nonvoters(poll.id)]
-    members = len(await db.member_chats())
-    sent = await send_many(cb.bot, waiting, "🔔 Ты ещё не проголосовал(а):\n\n" + poll_text(poll, None, members), poll_markup(poll))
-    await journal_add(db, staff, f"напоминание о голосовании #{poll.id}: дошло {sent} из {len(waiting)}")
-    await cb.answer(f"Напомнил: {sent} из {len(waiting)}", show_alert=True)
+    sent, total = await remind_poll(cb.bot, db, staff, poll)
+    await cb.answer(f"Напомнил: {sent} из {total}", show_alert=True)
 
 
 @router.callback_query(F.data.regexp(r"^(avx|avd):\d+$"))
@@ -938,16 +975,10 @@ async def cb_poll_do(cb: CallbackQuery, db: Database):
     if not (poll := await load_poll(cb, db, int(poll_id))):
         return
     if action == "avxok":
-        await db.close_poll(poll.id)
-        poll = await db.get_poll(poll.id)
-        await journal_add(db, staff, f"голосование #{poll.id} закрыто: {poll.question[:80]}")
-        chat_ids = await db.member_chats()
         await cb.answer("Закрываю, рассылаю итоги…")
-        await send_many(cb.bot, chat_ids, poll_text(poll, await db.poll_counts(poll.id), len(chat_ids)))
-        await show_poll_card(cb, db, poll, ack=False)
+        await show_poll_card(cb, db, await finish_poll(cb.bot, db, staff, poll), ack=False)
     else:
-        await db.delete_poll(poll.id)
-        await journal_add(db, staff, f"голосование #{poll.id} удалено: {poll.question[:80]}")
+        await remove_poll(db, staff, poll)
         await cb.answer("Удалено")
         await show(cb, "🗑 Голосование удалено.", kb([btn("🗳 К голосованиям", "av")], [ADMIN_BTN]), ack=False)
 

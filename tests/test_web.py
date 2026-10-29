@@ -298,3 +298,55 @@ def test_web_app_button_and_menu_button(monkeypatch):
     run(common.set_menu_button(Bot(), 1, "admin"))
     run(common.set_menu_button(Bot(), 2, "starosta"))
     assert sent == [(1, "MenuButtonWebApp"), (2, "MenuButtonCommands")], "кнопка «Панель» — только тем, кому открыта веб-панель"
+
+
+def test_polls_in_web(tmp_path):
+    async def scenario():
+        db, h, client, people = await setup(tmp_path)
+        try:
+            await login(client, db, OWNER)
+            r = await client.post("/api/polls", json={"question": "Где сдаём?", "options": ["А", "А", " "]}, headers=H)
+            assert r.status == 400, "после удаления повторов вариантов меньше двух"
+            r = await client.post("/api/polls", json={"question": "Где сдаём?", "options": ["Ауд. 101", "Ауд. 205"]}, headers=H)
+            data = await r.json()
+            assert r.status == 200 and data["total"] == 3, "голосование создано и разослано всем в боте"
+            poll = data["poll"]; a, b = [o["id"] for o in poll["options"]]
+            assert any(m[0] == STUDENT and m[1].startswith("🗳") for m in h.session.sent), "людям в Telegram пришли кнопки"
+            assert "голосование #" in " | ".join(x.text for x in await db.journal(50)) and "· веб" in (await db.journal(1))[0].text
+
+            # админ голосует как человек, цифры видны
+            r = await client.post(f"/api/polls/{poll['id']}/vote", json={"option": a}, headers=H)
+            assert (await r.json())["voted"] == 1
+            client.session.cookie_jar.clear()
+
+            # студент в вебе: роль не из WEB_ROLES → закрыто; открываем для студентов
+            config.WEB_ROLES.add("user")
+            assert (await login(client, db, STUDENT)).status == 200
+            lst = await (await client.get("/api/polls")).json()
+            assert lst[0]["voted"] is None and all(o["count"] is None for o in lst[0]["options"]), "до голоса цифр нет"
+            assert "waiting" not in lst[0], "список не голосовавших — только админу"
+            assert (await client.post(f"/api/polls/{poll['id']}/close", json={}, headers=H)).status == 403, "студент не закроет"
+            assert (await client.post("/api/polls", json={"question": "x", "options": ["1", "2"]}, headers=H)).status == 403
+            r = await client.post(f"/api/polls/{poll['id']}/vote", json={"option": b}, headers=H)
+            d = await r.json()
+            assert d["mine"] == b and d["voted"] == 2 and {o["count"] for o in d["options"]} == {1}, "после голоса видны цифры"
+            assert "waiting" not in d
+            r = await client.post(f"/api/polls/{poll['id']}/vote", json={"option": 99999}, headers=H)
+            assert r.status == 404
+            client.session.cookie_jar.clear()
+
+            await login(client, db, OWNER)
+            card = (await (await client.get("/api/polls")).json())[0]
+            assert len(card["waiting"]) == 1, "админ видит, кто ещё не голосовал (староста)"
+            r = await client.post(f"/api/polls/{poll['id']}/remind", json={}, headers=H)
+            assert (await r.json()) == {"sent": 1, "total": 1}
+            r = await client.post(f"/api/polls/{poll['id']}/close", json={}, headers=H)
+            assert (await r.json())["closed"] is True
+            assert (await client.post(f"/api/polls/{poll['id']}/vote", json={"option": a}, headers=H)).status == 409, "в закрытое не голосуют"
+            assert (await client.post(f"/api/polls/{poll['id']}/remind", json={}, headers=H)).status == 409
+            assert (await client.delete(f"/api/polls/{poll['id']}", headers=H)).status == 200
+            assert await (await client.get("/api/polls")).json() == []
+        finally:
+            config.WEB_ROLES.discard("user")
+            await client.close()
+    run(scenario())
