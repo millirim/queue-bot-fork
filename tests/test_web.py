@@ -242,3 +242,59 @@ def test_web_command_in_bot(tmp_path):
             await client.close()
             await db.close()
     run(scenario())
+
+
+def signed_init_data(token: str, user_id: int, age: int = 0, **extra) -> str:
+    """initData, как её подписывает Telegram для мини-приложения."""
+    import hashlib, hmac, json, time
+    from urllib.parse import urlencode
+    fields = {"auth_date": str(int(time.time()) - age), "query_id": "AAH", "user": json.dumps({"id": user_id, "first_name": "T"}), **extra}
+    check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+    secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+    fields["hash"] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    return urlencode(fields)
+
+
+def test_mini_app_login_checks_telegram_signature(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "BOT_TOKEN", "123456:TEST-TOKEN")
+    token = config.BOT_TOKEN
+
+    async def scenario():
+        db, h, client, _ = await setup(tmp_path)
+        try:
+            ok = await client.post("/api/login", json={"initData": signed_init_data(token, OWNER)}, headers=H)
+            assert ok.status == 200 and web.COOKIE in ok.cookies, "подпись верна — сессия выдана"
+            assert (await (await client.get("/api/me")).json())["role"] == "admin"
+            client.session.cookie_jar.clear()
+            bad = signed_init_data(token, OWNER).replace("AAH", "AAX")
+            assert (await client.post("/api/login", json={"initData": bad}, headers=H)).status == 401, "данные подменили — отказ"
+            other = signed_init_data("999:OTHER", OWNER)
+            assert (await client.post("/api/login", json={"initData": other}, headers=H)).status == 401, "подпись чужим токеном — отказ"
+            old = signed_init_data(token, OWNER, age=web.INIT_MAX_AGE + 60)
+            assert (await client.post("/api/login", json={"initData": old}, headers=H)).status == 401, "просроченные данные — отказ"
+            assert (await client.post("/api/login", json={"initData": "мусор"}, headers=H)).status == 401, "мусор — отказ"
+            r = await client.post("/api/login", json={"initData": signed_init_data(token, STUDENT)}, headers=H)
+            assert r.status == 403, "роль не из WEB_ROLES — отказ, даже с верной подписью"
+            r = await client.post("/api/login", json={"initData": signed_init_data(token, OWNER)})
+            assert r.status == 403, "без заголовка защиты от CSRF — отказ"
+        finally:
+            await client.close()
+    run(scenario())
+
+
+def test_web_app_button_and_menu_button(monkeypatch):
+    import admin
+    import common
+    monkeypatch.setattr(config, "WEB_URL", "https://queue.example.com")
+    markup = admin.web_app_button()
+    assert markup.inline_keyboard[0][0].web_app.url == "https://queue.example.com", "кнопка открывает панель как мини-приложение"
+    monkeypatch.setattr(config, "WEB_URL", "http://127.0.0.1:8080")
+    assert admin.web_app_button() is None, "http Telegram не принимает — кнопки нет, остаётся ссылка"
+    sent = []
+
+    class Bot:
+        async def set_chat_menu_button(self, chat_id, menu_button): sent.append((chat_id, type(menu_button).__name__))
+    monkeypatch.setattr(config, "WEB_URL", "https://queue.example.com")
+    run(common.set_menu_button(Bot(), 1, "admin"))
+    run(common.set_menu_button(Bot(), 2, "starosta"))
+    assert sent == [(1, "MenuButtonWebApp"), (2, "MenuButtonCommands")], "кнопка «Панель» — только тем, кому открыта веб-панель"
