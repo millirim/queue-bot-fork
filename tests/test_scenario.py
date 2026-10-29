@@ -266,22 +266,16 @@ async def scenario(tmp_path):
     await text(dp, 7, "🏠 На главную"); check(any(l == "🛠 Панель старосты" for l in labels(7)), "в меню у старосты — «Панель старосты»")
     await text(dp, 900, "🏠 На главную"); check(any(l == "🛠 Панель Админа" for l in labels(900)), "в меню у админа — «Панель Админа»")
 
-    # ===== кнопки под полем ввода =====
-    await text(dp, 2, "/start"); b1 = bottom(2)
-    check("👤 Моё" in b1 and "🏠 На главную" in b1 and any("🔥 ПнаЯВУ" in t for t in b1) and not any("🛠" in t for t in b1),
-          "студенту — предметы, «Моё» и «На главную» под полем ввода, без панели")
+    # ===== кнопка под полем ввода =====
+    await text(dp, 2, "/start"); b2 = bottom(2)
+    check(b2 == ["🏠 На главную"], "под полем ввода — одна кнопка «На главную»")
     check(last(2)[2].is_persistent and last(2)[2].resize_keyboard, "клавиатура закреплена и подогнана по размеру")
     check('"style":"danger"' in last(2)[2].model_dump_json(exclude_none=True).replace(" ", ""), "нижняя «На главную» красная")
-    await text(dp, 7, "/start"); check("🛠 Панель старосты" in bottom(7), "старосте — «Панель старосты» внизу")
-    await text(dp, 900, "/start"); check("🛠 Панель Админа" in bottom(900), "админу — «Панель Админа» внизу")
-    await text(dp, 2, "🔥 ПнаЯВУ"); check("очередь сейчас" in last(2)[1], "нижняя кнопка предмета открывает очередь")
-    await text(dp, 2, "👤 Моё"); check("Моё" in last(2)[1], "нижняя «Моё» открывает «Моё»")
-    await text(dp, 7, "🛠 Панель старосты"); check("Панель старосты" in last(7)[1], "нижняя кнопка открывает панель старосты")
-    await text(dp, 2, "🛠 Панель Админа"); check("недоступна" in last(2)[1] and not any("🛠" in t for t in bottom(2)), "студент чужую панель не откроет, клавиатуру обновили")
+    await text(dp, 900, "/start"); check(bottom(900) == ["🏠 На главную"], "админу — тоже одна кнопка")
     await press(dp, 2, f"sd:{bd}:1"); await press(dp, 2, f"sm:{bd}"); check("Попросить −1" in last(2)[1], "ждём причину −1")
-    await text(dp, 2, "🔥 ПнаЯВУ")
-    check("очередь сейчас" in last(2)[1], "нажатие кнопки не принимается за причину −1 (ввод сброшен)")
-    await text(dp, 2, "что-то непонятное"); check("внизу" in last(2)[1] and "🏠 На главную" in bottom(2), "непонятный текст — подсказка и свежая клавиатура")
+    await text(dp, 2, "🏠 На главную")
+    check("Выбери предмет" in last(2)[1] and "s:%d" % bd in buttons(2), "нижняя кнопка открывает меню и сбрасывает ввод причины")
+    await text(dp, 2, "что-то непонятное"); check("внизу" in last(2)[1] and bottom(2) == ["🏠 На главную"], "непонятный текст — подсказка и свежая клавиатура")
 
     # ===== значки в списке людей =====
     await press(dp, 900, "ap"); lab = labels(900)

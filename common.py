@@ -179,22 +179,13 @@ def btn(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
 MENU_BTN = btn("🏠 На главную", "menu", style="danger")
 
 
-# --- кнопки под полем ввода (постоянная клавиатура) ---
-BTN_MY = "👤 Моё"
+# --- кнопка под полем ввода (постоянная клавиатура) ---
 BTN_HOME = "🏠 На главную"
 
 
-def panel_button(kind: str) -> str:
-    return f"🛠 {panel_name(kind)}"
-
-
-def bottom_menu(subjects: list[Subject], kind: str | None) -> ReplyKeyboardMarkup:
-    """Постоянные кнопки под полем ввода: предметы, «Моё», панель (старостам и админам) и «На главную».
-    Нажатие приходит боту обычным сообщением — его ловит bottom.py."""
-    rows = rows_of([KeyboardButton(text=s.title) for s in subjects])
-    rows.append([KeyboardButton(text=BTN_MY)] + ([KeyboardButton(text=panel_button(kind))] if kind else []))
-    rows.append([KeyboardButton(text=BTN_HOME, style="danger")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True, input_field_placeholder="Выбери предмет")
+def bottom_menu() -> ReplyKeyboardMarkup:
+    """Под полем ввода одна постоянная кнопка — красная «🏠 На главную». Нажатие приходит боту текстом, его ловит bottom.py."""
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=BTN_HOME, style="danger")]], is_persistent=True, resize_keyboard=True)
 
 
 async def bottom_for(db: Database, chat_id: int) -> ReplyKeyboardMarkup | ReplyKeyboardRemove:
@@ -202,7 +193,7 @@ async def bottom_for(db: Database, chat_id: int) -> ReplyKeyboardMarkup | ReplyK
     student = await db.student_by_chat(chat_id)
     if student is None:
         return ReplyKeyboardRemove()
-    return bottom_menu(await db.subjects(), staff_kind(chat_id, student))
+    return bottom_menu()
 
 
 def rows_of(buttons: list, size: int = 2) -> list[list]:
