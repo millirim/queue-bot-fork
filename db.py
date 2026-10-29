@@ -1,5 +1,7 @@
+import hashlib
 import logging
 import os
+import secrets
 import tempfile
 import zipfile
 import re
@@ -110,6 +112,15 @@ CREATE TABLE IF NOT EXISTS audit (
     actor_id   INTEGER NOT NULL,
     actor_name TEXT NOT NULL,
     text       TEXT NOT NULL
+);
+
+-- Веб-панель (web.py): одноразовые ссылки для входа из бота и сессии браузера. Хранится только хэш токена.
+CREATE TABLE IF NOT EXISTS web_sessions (
+    token      TEXT PRIMARY KEY,            -- sha256 токена; сам токен есть только у браузера / в ссылке
+    chat_id    INTEGER NOT NULL,            -- чей Telegram
+    kind       TEXT NOT NULL,               -- login — ссылка из бота (одноразовая), session — вход в браузере
+    created_at TEXT NOT NULL,               -- ISO, местное время
+    expires_at TEXT NOT NULL                -- ISO, местное время; после — недействителен
 );
 """
 
@@ -678,6 +689,60 @@ class Database:
                 z.write(copy, "queue.db")
             with open(archive, "rb") as f:
                 return name, f.read()
+
+    # --- веб-панель ---
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    async def web_token(self, chat_id: int, kind: str, seconds: int) -> str:
+        """Новый токен входа (kind='login') или сессии ('session'). В базу ложится только его хэш."""
+        assert kind in ("login", "session")
+        token, now = secrets.token_urlsafe(32), local_now()
+        await self._write(
+            "INSERT INTO web_sessions (token, chat_id, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (self._token_hash(token), chat_id, kind, now.isoformat(timespec="seconds"),
+             (now + timedelta(seconds=seconds)).isoformat(timespec="seconds")),
+        )
+        return token
+
+    async def web_check(self, token: str, kind: str, consume: bool = False) -> int | None:
+        """chat_id владельца действующего токена; consume — удалить (ссылка для входа одноразовая)."""
+        now = local_now().isoformat(timespec="seconds")
+        await self.conn.execute("DELETE FROM web_sessions WHERE expires_at < ?", (now,))
+        key = self._token_hash(token)
+        row = await self._one("SELECT chat_id FROM web_sessions WHERE token = ? AND kind = ?", (key, kind))
+        if row and consume:
+            await self.conn.execute("DELETE FROM web_sessions WHERE token = ?", (key,))
+        await self.conn.commit()
+        return row["chat_id"] if row else None
+
+    async def web_logout(self, token: str | None = None, chat_id: int | None = None) -> None:
+        """Завершает одну сессию (по токену) или все входы человека (по chat_id)."""
+        if token:
+            await self._write("DELETE FROM web_sessions WHERE token = ?", (self._token_hash(token),))
+        if chat_id is not None:
+            await self._write("DELETE FROM web_sessions WHERE chat_id = ?", (chat_id,))
+
+    async def web_session_count(self, chat_id: int) -> int:
+        row = await self._one("SELECT COUNT(*) AS c FROM web_sessions WHERE chat_id = ? AND kind = 'session'", (chat_id,))
+        return row["c"]
+
+    async def stats(self) -> dict[str, int]:
+        """Цифры для обзора в веб-панели."""
+        row = await self._one(
+            "SELECT (SELECT COUNT(*) FROM students WHERE active = 1) AS people, "
+            "(SELECT COUNT(*) FROM students WHERE active = 1 AND chat_id IS NOT NULL) AS in_bot, "
+            "(SELECT COUNT(*) FROM students WHERE active = 0) AS inactive, "
+            "(SELECT COUNT(*) FROM subjects) AS subjects, "
+            "(SELECT COUNT(*) FROM requests) AS requests, "
+            "(SELECT COUNT(*) FROM minus_requests) AS minus, "
+            "(SELECT COUNT(*) FROM progress p JOIN students s ON s.id = p.student_id "
+            " WHERE s.active = 1 AND p.want_since IS NOT NULL) AS wanting, "
+            "(SELECT COALESCE(SUM(p.done), 0) FROM progress p JOIN students s ON s.id = p.student_id "
+            " WHERE s.active = 1) AS done"
+        )
+        return dict(row)
 
     # --- журнал ---
     async def log_action(self, actor_id: int, actor_name: str, text: str) -> None:

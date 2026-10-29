@@ -73,6 +73,8 @@ class Harness:
         import handlers
         dp = Dispatcher()
         dp["db"] = db
+        for router in (bottom.router, admin.router, handlers.router):
+            router._parent_router = None  # роутер можно подключить только к одному диспетчеру, а сценариев несколько
         dp.include_router(bottom.router)
         dp.include_router(admin.router)  # как в main.py: сначала панель, запасные обработчики — в самом конце
         dp.include_router(handlers.router)

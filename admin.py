@@ -13,12 +13,13 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import BufferedInputFile, CallbackQuery, LinkPreviewOptions, Message, ReplyKeyboardRemove
 
 import config
 from common import (
     MENU_BTN, bottom_for, btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
-    edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, works,
+    edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed,
+    web_role, works,
 )
 import logsink
 import updater
@@ -97,6 +98,8 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
     if staff.admin:
         rows.append([btn("📚 Предметы", "as"), btn("💾 Копия базы", "abk")])
         rows.append([btn("🔄 Обновить бота", "abu")])
+    if web_allowed("admin" if staff.admin else "starosta"):
+        rows.append([btn("🌐 Веб-панель", "aw")])
     rows.append([MENU_BTN])
     who = "админ" if staff.admin else "староста"
     await show(
@@ -939,6 +942,45 @@ async def cb_update_confirm(cb: CallbackQuery, db: Database):
         cb, "⏳ <b>Обновляю бота…</b>\nСкачиваю версию, делаю копию базы, перезапускаю. Это занимает до минуты — "
             "итог пришлю сюда.", kb([ADMIN_BTN]), ack=False,
     )
+
+
+# ================= веб-панель: ссылка для входа =================
+WEB_LOGIN_TTL = 10 * 60  # сколько живёт ссылка для входа, секунд; она одноразовая
+
+
+async def send_web_link(target: Message | CallbackQuery, db: Database) -> None:
+    """Одноразовая ссылка для входа в веб-панель (web.py) — тем, кому можно по WEB_ROLES."""
+    chat_id = target.from_user.id
+    role = web_role(chat_id, await db.student_by_chat(chat_id))
+    if not web_allowed(role):
+        text = "Веб-панель выключена" if not config.WEB_PORT else "Веб-панель пока доступна только админам"
+        if isinstance(target, CallbackQuery):
+            await target.answer(text, show_alert=True)
+        else:
+            await target.answer(text)
+        return
+    token = await db.web_token(chat_id, "login", WEB_LOGIN_TTL)
+    url = f"{config.WEB_URL}/login?t={token}"
+    message = target.message if isinstance(target, CallbackQuery) else target
+    await message.answer(
+        f"🌐 <b>Веб-панель</b>\n\n<a href=\"{esc(url)}\">Войти</a> — ссылка одноразовая и действует "
+        f"{WEB_LOGIN_TTL // 60} минут. Никому её не пересылай: по ней входят под тобой.\n\n<code>{esc(url)}</code>",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    if isinstance(target, CallbackQuery):
+        await target.answer()
+    log.info("Ссылка для входа в веб-панель выдана (id %s)", chat_id)
+
+
+@router.message(Command("web"))
+async def cmd_web(msg: Message, state: FSMContext, db: Database):
+    await state.clear()
+    await send_web_link(msg, db)
+
+
+@router.callback_query(F.data == "aw")
+async def cb_web(cb: CallbackQuery, db: Database):
+    await send_web_link(cb, db)
 
 
 # ================= копия базы (только админ) =================
