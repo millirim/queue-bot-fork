@@ -49,6 +49,26 @@ STAFF_COMMANDS = {
 }
 
 
+WEB_COMMAND = BotCommand(command="web", description="Веб-панель: ссылка для входа")
+
+
+def web_role(chat_id: int, student: Student | None) -> str | None:
+    """Роль для веб-панели: 'admin', 'starosta', 'user' (в списке группы) или None (входить некому)."""
+    kind = staff_kind(chat_id, student)
+    if kind:
+        return "admin" if kind == "admin" else "starosta"
+    return "user" if student else None
+
+
+def web_allowed(role: str | None) -> bool:
+    """Можно ли этой роли в веб-панель (WEB_ROLES) и включена ли она вообще (WEB_PORT)."""
+    return bool(config.WEB_PORT) and role in config.WEB_ROLES
+
+
+if web_allowed("user"):
+    BASE_COMMANDS.append(WEB_COMMAND)
+
+
 def panel_name(kind: str | None) -> str:
     """Как называется панель: у админов — «Панель Админа», у старост — «Панель старосты»."""
     return "Панель Админа" if kind == "admin" else "Панель старосты"
@@ -68,7 +88,9 @@ async def set_commands(bot: Bot, chat_id: int, kind: str | None) -> None:
         if kind is None:
             await bot.delete_my_commands(scope=scope)
         else:
-            await bot.set_my_commands([*BASE_COMMANDS, STAFF_COMMANDS[kind]], scope=scope)
+            role = "admin" if kind == "admin" else "starosta"
+            web = [WEB_COMMAND] if web_allowed(role) and WEB_COMMAND not in BASE_COMMANDS else []
+            await bot.set_my_commands([*BASE_COMMANDS, STAFF_COMMANDS[kind], *web], scope=scope)
     except TelegramAPIError as e:  # например, человек ещё ни разу не писал боту
         log.info("Команды для %s не обновлены: %s", chat_id, e)
 
