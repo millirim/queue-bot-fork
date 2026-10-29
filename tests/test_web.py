@@ -350,3 +350,35 @@ def test_polls_in_web(tmp_path):
             config.WEB_ROLES.discard("user")
             await client.close()
     run(scenario())
+
+
+def test_swap_marks_and_admin_can_break_it_in_web(tmp_path):
+    async def scenario():
+        db, h, client, people = await setup(tmp_path)
+        try:
+            subject = (await db.subjects())[0]
+            a, b = people["Студентов"], people["Старостина"]
+            for who in (a, b):
+                await db.set_want(who, subject.id, True)
+            sid = await db.propose_swap(a, b, subject.id)
+            await db.accept_swap(sid, b)
+            await login(client, db, OWNER)
+            data = await (await client.get(f"/api/queue/{subject.id}")).json()
+            assert [r["swapped"] for r in data["rows"]].count(True) == 2, "в очереди двое помечены «обмен»"
+            assert [w["id"] for w in data["swaps"]] == [sid], "админ видит действующие обмены"
+            r = await client.post(f"/api/swaps/{sid}/cancel", json={}, headers=H)
+            assert r.status == 200 and (await db.get_swap(sid)).status == "cancelled"
+            assert (await client.post(f"/api/swaps/{sid}/cancel", json={}, headers=H)).status == 409
+            assert "обмен разорван" in (await db.journal(1))[0].text and "· веб" in (await db.journal(1))[0].text
+            assert any(m[0] == STUDENT and "отменён" in m[1] for m in h.session.sent), "людям пришло уведомление"
+            data = await (await client.get(f"/api/queue/{subject.id}")).json()
+            assert not any(r["swapped"] for r in data["rows"]) and data["swaps"] == []
+            client.session.cookie_jar.clear()
+            config.WEB_ROLES.add("starosta")
+            await login(client, db, STAROSTA)
+            r = await client.post(f"/api/swaps/{sid}/cancel", json={}, headers=H)
+            assert r.status == 403, "староста обмены не разрывает"
+            assert "swaps" not in await (await client.get(f"/api/queue/{subject.id}")).json()
+        finally:
+            await client.close()
+    run(scenario())

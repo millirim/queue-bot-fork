@@ -101,7 +101,8 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
     ]
     if staff.admin:
         rows.append([btn("📚 Предметы", "as"), btn("💾 Копия базы", "abk")])
-        rows.append([btn("🗳 Голосования", "av"), btn("🔄 Обновить бота", "abu")])
+        rows.append([btn("🗳 Голосования", "av"), btn("🔁 Обмены", "ax")])
+        rows.append([btn("🔄 Обновить бота", "abu")])
     if web_allowed("admin" if staff.admin else "starosta"):
         rows.append([btn("🌐 Веб-панель", "aw")])
     rows.append([MENU_BTN])
@@ -785,6 +786,43 @@ async def cb_broadcast_send(cb: CallbackQuery, state: FSMContext, db: Database):
     sent = await send_many(cb.bot, chat_ids, broadcast_text(staff, text))
     await journal_add(db, staff, f"рассылка (дошла {sent} из {len(chat_ids)}): {text[:80]}")
     await show(cb, f"📢 Отправлено: {sent} из {len(chat_ids)}.", kb([ADMIN_BTN]), ack=False)
+
+
+# ================= обмены местами (только админ) =================
+@router.callback_query(F.data == "ax")
+async def cb_swaps(cb: CallbackQuery, state: FSMContext, db: Database):
+    await state.clear()
+    if await need_staff(cb, db, admin_only=True):
+        await show_swaps(cb, db)
+
+
+async def show_swaps(cb: CallbackQuery, db: Database):
+    rows, lines = [], []
+    for swap in await db.active_swaps():
+        a, b, subject = await db.get_student(swap.from_id), await db.get_student(swap.to_id), await db.get_subject(swap.subject_id)
+        lines.append(f"• {esc(subject.title)}: {esc(short_name(a.name))} ↔ {esc(short_name(b.name))}")
+        rows.append([btn(f"✂️ {subject.emoji} {short_name(a.name)} ↔ {short_name(b.name)}", f"axc:{swap.id}")])
+    await show(
+        cb, "🔁 <b>Обмены местами</b>\n\nДействующие обмены. Кнопка разрывает обмен: оба сразу на своих местах, "
+        "лимит у них не тратится.\n\n" + ("\n".join(lines) if lines else "Сейчас обменов нет."),
+        kb(*rows, [ADMIN_BTN]),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^axc:\d+$"))
+async def cb_swap_break(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db, admin_only=True)):
+        return
+    swap = await db.end_swap(int(cb.data[4:]), "cancelled")
+    if swap is None:
+        await cb.answer("Этот обмен уже не действует", show_alert=True)
+    else:
+        a, b, subject = await db.get_student(swap.from_id), await db.get_student(swap.to_id), await db.get_subject(swap.subject_id)
+        await journal_add(db, staff, f"обмен разорван: {a.name} ↔ {b.name} · {subject.name}")
+        for who in (a, b):
+            await notify(cb.bot, who, f"🔁 Обмен по {esc(subject.title)} отменён ({esc(staff.signature)}). Ты на своём обычном месте.")
+        await cb.answer("Обмен разорван")
+    await show_swaps(cb, db)
 
 
 # ================= голосования (только админ) =================
