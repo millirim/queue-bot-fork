@@ -440,3 +440,31 @@ def test_server_log_storage_filters_and_limit(tmp_path, monkeypatch):
         assert len((await db.server_logs("all", 0, 100))[0]) == 4  # хранятся только последние LOG_KEEP
         await db.close()
     run(go())
+
+
+def test_polls_one_vote_per_person_and_closing(tmp_path):
+    async def scenario():
+        db = await make_db(tmp_path)
+        await db.add_students(["Антонов Антон Антонович", "Борисов Борис Борисович", "Ветров Виктор Викторович"])
+        a, b, c = [s.id for s in await db.students()]
+        await db.link(11, "a", a); await db.link(12, "b", b)
+        poll_id = await db.create_poll("Когда?", ["Пн", "Вт"], "админ Тест")
+        poll = await db.get_poll(poll_id)
+        mon, tue = [o for o, _ in poll.options]
+        assert [t for _, t in poll.options] == ["Пн", "Вт"] and not poll.closed
+        assert await db.vote(poll_id, a, mon) == "ok"
+        assert await db.vote(poll_id, a, mon) == "same"
+        assert await db.vote(poll_id, a, tue) == "ok", "голос можно поменять"
+        assert await db.vote(poll_id, a, 9999) == "none", "чужой вариант не принимается"
+        await db.vote(poll_id, b, tue)
+        assert await db.poll_counts(poll_id) == {tue: 2}
+        assert [s.id for s in await db.poll_nonvoters(poll_id)] == [], "не голосовал только тот, кого нет в боте"
+        await db.set_active(b, False)
+        assert await db.poll_counts(poll_id) == {tue: 1}, "голос ушедшего из группы не считается"
+        assert await db.close_poll(poll_id) and not await db.close_poll(poll_id)
+        assert await db.vote(poll_id, a, mon) == "closed"
+        assert await db.my_vote(poll_id, a) == tue
+        assert await db.delete_poll(poll_id) and await db.get_poll(poll_id) is None
+        assert await db.poll_counts(poll_id) == {}
+        await db.close()
+    run(scenario())

@@ -21,11 +21,11 @@ import config
 from common import (
     MENU_BTN, bottom_for, btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed,
-    web_role, works,
+    web_role, works, POLL_MAX_OPTIONS, POLL_OPTION_LEN, poll_markup, poll_text,
 )
 import logsink
 import updater
-from db import ROLES, AuditRecord, Database, MinusRequest, Request, ServerLog, Student, parse_roster
+from db import ROLES, AuditRecord, Database, MinusRequest, Poll, Request, ServerLog, Student, parse_roster
 from ranking import WANT
 
 log = logging.getLogger(__name__)
@@ -44,6 +44,8 @@ class AdminForm(StatesGroup):
     subject_name = State()
     subject_emoji = State()
     subject_total = State()
+    poll_question = State()
+    poll_options = State()
 
 
 @dataclass
@@ -99,7 +101,7 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
     ]
     if staff.admin:
         rows.append([btn("📚 Предметы", "as"), btn("💾 Копия базы", "abk")])
-        rows.append([btn("🔄 Обновить бота", "abu")])
+        rows.append([btn("🗳 Голосования", "av"), btn("🔄 Обновить бота", "abu")])
     if web_allowed("admin" if staff.admin else "starosta"):
         rows.append([btn("🌐 Веб-панель", "aw")])
     rows.append([MENU_BTN])
@@ -783,6 +785,171 @@ async def cb_broadcast_send(cb: CallbackQuery, state: FSMContext, db: Database):
     sent = await send_many(cb.bot, chat_ids, broadcast_text(staff, text))
     await journal_add(db, staff, f"рассылка (дошла {sent} из {len(chat_ids)}): {text[:80]}")
     await show(cb, f"📢 Отправлено: {sent} из {len(chat_ids)}.", kb([ADMIN_BTN]), ack=False)
+
+
+# ================= голосования (только админ) =================
+def poll_title(poll: Poll, voted: int | None = None, members: int | None = None) -> str:
+    done = f" · {voted}/{members}" if voted is not None else ""
+    return f"{'🔒' if poll.closed else '🟢'} {poll.question[:32]}{done}"
+
+
+@router.callback_query(F.data == "av")
+async def cb_polls(cb: CallbackQuery, state: FSMContext, db: Database):
+    await state.clear()
+    if not await need_staff(cb, db, admin_only=True):
+        return
+    members, rows = len(await db.member_chats()), []
+    for poll in await db.polls():
+        rows.append([btn(poll_title(poll, sum((await db.poll_counts(poll.id)).values()), members), f"av:{poll.id}")])
+    await show(
+        cb, "🗳 <b>Голосования</b>\n\nВопрос с вариантами ответа: всей группе в боте приходит сообщение с кнопками.\n"
+        "Голосование анонимное; пока оно открыто, человек может поменять голос." + ("" if rows else "\n\nПока ни одного нет."),
+        kb(*rows, [btn("➕ Создать", "avn")], [ADMIN_BTN]),
+    )
+
+
+@router.callback_query(F.data == "avn")
+async def cb_poll_new(cb: CallbackQuery, state: FSMContext, db: Database):
+    if not await need_staff(cb, db, admin_only=True):
+        return
+    await state.set_state(AdminForm.poll_question)
+    await show(cb, "🗳 <b>Новое голосование</b>\n\nНапиши вопрос одним сообщением.", kb([btn("⬅️ Отмена", "av")]))
+
+
+@router.message(AdminForm.poll_question, F.text, ~F.text.startswith("/"))
+async def admin_poll_question(msg: Message, state: FSMContext, db: Database):
+    if not await need_staff(msg, db, admin_only=True):
+        await state.clear()
+        return
+    question = " ".join(msg.text.split())
+    if len(question) > 200:
+        await msg.answer("⚠️ Слишком длинно, максимум 200 символов.")
+        return
+    await state.update_data(question=question)
+    await state.set_state(AdminForm.poll_options)
+    await msg.answer(
+        f"Вопрос: <b>{esc(question)}</b>\n\nТеперь варианты ответа — <b>по одному в строке</b> "
+        f"(от 2 до {POLL_MAX_OPTIONS}, до {POLL_OPTION_LEN} символов каждый).",
+        reply_markup=kb([btn("⬅️ Отмена", "av")]),
+    )
+
+
+@router.message(AdminForm.poll_options, F.text, ~F.text.startswith("/"))
+async def admin_poll_options(msg: Message, state: FSMContext, db: Database):
+    if not await need_staff(msg, db, admin_only=True):
+        await state.clear()
+        return
+    options = list(dict.fromkeys(" ".join(line.split()) for line in msg.text.splitlines() if line.strip()))
+    if not 2 <= len(options) <= POLL_MAX_OPTIONS or any(len(o) > POLL_OPTION_LEN for o in options):
+        await msg.answer(f"⚠️ Нужно от 2 до {POLL_MAX_OPTIONS} разных вариантов, по одному в строке, каждый до {POLL_OPTION_LEN} символов.")
+        return
+    await state.update_data(options=options)
+    question = (await state.get_data())["question"]
+    preview = Poll(0, question, "", "", False, list(enumerate(options)))
+    await msg.answer(
+        f"Так увидит группа ({len(await db.member_chats())} чел. в боте):\n\n{poll_text(preview, None, 0)}\n\n"
+        + "\n".join(f"▫️ {esc(o)}" for o in options),
+        reply_markup=kb([btn("🗳 Отправить", "avs")], [btn("✏️ Заново", "avn"), btn("⬅️ Отмена", "av")]),
+    )
+
+
+@router.callback_query(AdminForm.poll_options, F.data == "avs")
+async def cb_poll_send(cb: CallbackQuery, state: FSMContext, db: Database):
+    staff = await need_staff(cb, db, admin_only=True)
+    data = await state.get_data()
+    if not staff or not data.get("options"):
+        await cb.answer("Сначала напиши вопрос и варианты", show_alert=True)
+        return
+    await state.clear()
+    await cb.answer("Отправляю…")
+    poll_id = await db.create_poll(data["question"], data["options"], staff.signature)
+    poll = await db.get_poll(poll_id)
+    chat_ids = await db.member_chats()
+    sent = await send_many(cb.bot, chat_ids, poll_text(poll, None, len(chat_ids)), poll_markup(poll))
+    await journal_add(db, staff, f"голосование #{poll_id} (дошло {sent} из {len(chat_ids)}): {poll.question[:80]}")
+    await show(cb, f"🗳 Голосование отправлено: {sent} из {len(chat_ids)}.", kb([btn("📊 Результаты", f"av:{poll_id}")], [ADMIN_BTN]), ack=False)
+
+
+async def show_poll_card(cb: CallbackQuery, db: Database, poll: Poll, ack: bool = True):
+    members = len(await db.member_chats())
+    text = poll_text(poll, await db.poll_counts(poll.id), members)
+    waiting = await db.poll_nonvoters(poll.id)
+    if waiting:
+        names = ", ".join(esc(short_name(s.name)) for s in waiting[:30])
+        text += f"\n\n<b>Ещё не проголосовали ({len(waiting)}):</b> {names}{' …' if len(waiting) > 30 else ''}"
+    rows = []
+    if not poll.closed:
+        if waiting:
+            rows.append([btn("🔔 Напомнить", f"avr:{poll.id}")])
+        rows.append([btn("🔒 Закрыть", f"avx:{poll.id}")])
+    rows.append([btn("🗑 Удалить", f"avd:{poll.id}")])
+    await show(cb, text, kb(*rows, [btn("⬅️ К голосованиям", "av")]), ack)
+
+
+async def load_poll(cb: CallbackQuery, db: Database, poll_id: int) -> Poll | None:
+    if poll := await db.get_poll(poll_id):
+        return poll
+    await cb.answer("Такого голосования больше нет", show_alert=True)
+    return None
+
+
+@router.callback_query(F.data.regexp(r"^av:\d+$"))
+async def cb_poll_card(cb: CallbackQuery, db: Database):
+    if await need_staff(cb, db, admin_only=True) and (poll := await load_poll(cb, db, int(cb.data[3:]))):
+        await show_poll_card(cb, db, poll)
+
+
+@router.callback_query(F.data.regexp(r"^avr:\d+$"))
+async def cb_poll_remind(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db, admin_only=True)) or not (poll := await load_poll(cb, db, int(cb.data[4:]))):
+        return
+    if poll.closed:
+        await cb.answer("Голосование закрыто", show_alert=True)
+        return
+    waiting = [s.chat_id for s in await db.poll_nonvoters(poll.id)]
+    members = len(await db.member_chats())
+    sent = await send_many(cb.bot, waiting, "🔔 Ты ещё не проголосовал(а):\n\n" + poll_text(poll, None, members), poll_markup(poll))
+    await journal_add(db, staff, f"напоминание о голосовании #{poll.id}: дошло {sent} из {len(waiting)}")
+    await cb.answer(f"Напомнил: {sent} из {len(waiting)}", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^(avx|avd):\d+$"))
+async def cb_poll_ask(cb: CallbackQuery, db: Database):
+    if not await need_staff(cb, db, admin_only=True):
+        return
+    action, poll_id = cb.data.split(":")
+    if not (poll := await load_poll(cb, db, int(poll_id))):
+        return
+    closing = action == "avx"
+    question = (
+        "Закрыть голосование? Голоса больше не принимаются, всем в боте придут итоги." if closing
+        else "Удалить голосование вместе со всеми голосами? Это нельзя отменить.")
+    await show(
+        cb, f"<b>{esc(poll.question)}</b>\n\n{question}",
+        kb([btn("🔒 Да, закрыть" if closing else "🗑 Да, удалить", f"{action}ok:{poll.id}")], [btn("⬅️ Нет", f"av:{poll.id}")]),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^(avxok|avdok):\d+$"))
+async def cb_poll_do(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db, admin_only=True)):
+        return
+    action, poll_id = cb.data.split(":")
+    if not (poll := await load_poll(cb, db, int(poll_id))):
+        return
+    if action == "avxok":
+        await db.close_poll(poll.id)
+        poll = await db.get_poll(poll.id)
+        await journal_add(db, staff, f"голосование #{poll.id} закрыто: {poll.question[:80]}")
+        chat_ids = await db.member_chats()
+        await cb.answer("Закрываю, рассылаю итоги…")
+        await send_many(cb.bot, chat_ids, poll_text(poll, await db.poll_counts(poll.id), len(chat_ids)))
+        await show_poll_card(cb, db, poll, ack=False)
+    else:
+        await db.delete_poll(poll.id)
+        await journal_add(db, staff, f"голосование #{poll.id} удалено: {poll.question[:80]}")
+        await cb.answer("Удалено")
+        await show(cb, "🗑 Голосование удалено.", kb([btn("🗳 К голосованиям", "av")], [ADMIN_BTN]), ack=False)
 
 
 # ================= журнал =================

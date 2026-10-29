@@ -122,6 +122,30 @@ CREATE TABLE IF NOT EXISTS web_sessions (
     created_at TEXT NOT NULL,               -- ISO, местное время
     expires_at TEXT NOT NULL                -- ISO, местное время; после — недействителен
 );
+
+-- Голосования: вопрос с вариантами; один голос на человека, пока голосование открыто его можно поменять.
+CREATE TABLE IF NOT EXISTS polls (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    question   TEXT NOT NULL,
+    created_at TEXT NOT NULL,               -- ISO, местное время
+    created_by TEXT NOT NULL,               -- подпись админа («админ Иванов Иван»)
+    closed_at  TEXT                         -- NULL — голосование открыто
+);
+
+CREATE TABLE IF NOT EXISTS poll_options (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    poll_id INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+    pos     INTEGER NOT NULL,               -- порядок показа
+    text    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS poll_votes (
+    poll_id    INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    option_id  INTEGER NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
+    voted_at   TEXT NOT NULL,
+    PRIMARY KEY (poll_id, student_id)
+);
 """
 
 # Таблицы прошлых версий. Ботом тогда никто не пользовался — пересоздаём.
@@ -173,6 +197,16 @@ class Subject:
     def title(self) -> str:
         """Название с эмодзи — так предмет показывается в кнопках и заголовках."""
         return f"{self.emoji} {self.name}"
+
+
+@dataclass
+class Poll:
+    id: int
+    question: str
+    created_at: str
+    created_by: str
+    closed: bool
+    options: list[tuple[int, str]]  # (id варианта, текст) в порядке показа
 
 
 @dataclass
@@ -405,6 +439,72 @@ class Database:
     async def member_chats(self) -> list[int]:
         """Telegram всех из группы, кто есть в боте."""
         return [s.chat_id for s in await self.students() if s.linked]
+
+    # --- голосования ---
+    async def create_poll(self, question: str, options: list[str], by: str) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO polls (question, created_at, created_by) VALUES (?, ?, ?)",
+            (question, local_now().isoformat(timespec="seconds"), by),
+        )
+        poll_id = cur.lastrowid
+        await self.conn.executemany(
+            "INSERT INTO poll_options (poll_id, pos, text) VALUES (?, ?, ?)",
+            [(poll_id, i, text) for i, text in enumerate(options)],
+        )
+        await self.conn.commit()
+        return poll_id
+
+    async def _poll(self, row) -> Poll:
+        options = await self._all("SELECT id, text FROM poll_options WHERE poll_id = ? ORDER BY pos", (row["id"],))
+        return Poll(row["id"], row["question"], row["created_at"], row["created_by"], row["closed_at"] is not None,
+                    [(o["id"], o["text"]) for o in options])
+
+    async def get_poll(self, poll_id: int) -> Poll | None:
+        row = await self._one("SELECT * FROM polls WHERE id = ?", (poll_id,))
+        return await self._poll(row) if row else None
+
+    async def polls(self, limit: int = 20) -> list[Poll]:
+        """Голосования, новые сверху."""
+        rows = await self._all("SELECT * FROM polls ORDER BY id DESC LIMIT ?", (limit,))
+        return [await self._poll(r) for r in rows]
+
+    async def poll_counts(self, poll_id: int) -> dict[int, int]:
+        """Сколько голосов у каждого варианта (id варианта → число); голоса ушедших из группы не считаются."""
+        rows = await self._all(
+            "SELECT v.option_id, COUNT(*) AS n FROM poll_votes v JOIN students s ON s.id = v.student_id "
+            "WHERE v.poll_id = ? AND s.active = 1 GROUP BY v.option_id", (poll_id,))
+        return {r["option_id"]: r["n"] for r in rows}
+
+    async def my_vote(self, poll_id: int, student_id: int) -> int | None:
+        row = await self._one("SELECT option_id FROM poll_votes WHERE poll_id = ? AND student_id = ?", (poll_id, student_id))
+        return row["option_id"] if row else None
+
+    async def vote(self, poll_id: int, student_id: int, option_id: int) -> str:
+        """'ok' — голос принят или изменён, 'same' — уже так проголосовал, 'closed' — голосование закрыто, 'none' — нет такого."""
+        poll = await self.get_poll(poll_id)
+        if poll is None or option_id not in {o for o, _ in poll.options}:
+            return "none"
+        if poll.closed:
+            return "closed"
+        if await self.my_vote(poll_id, student_id) == option_id:
+            return "same"
+        await self._write(
+            "INSERT INTO poll_votes (poll_id, student_id, option_id, voted_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(poll_id, student_id) DO UPDATE SET option_id = excluded.option_id, voted_at = excluded.voted_at",
+            (poll_id, student_id, option_id, local_now().isoformat(timespec="seconds")))
+        return "ok"
+
+    async def poll_nonvoters(self, poll_id: int) -> list[Student]:
+        """Кто есть в боте и ещё не проголосовал."""
+        voted = {r["student_id"] for r in await self._all("SELECT student_id FROM poll_votes WHERE poll_id = ?", (poll_id,))}
+        return [s for s in await self.students() if s.linked and s.id not in voted]
+
+    async def close_poll(self, poll_id: int) -> bool:
+        return await self._write("UPDATE polls SET closed_at = ? WHERE id = ? AND closed_at IS NULL",
+                                 (local_now().isoformat(timespec="seconds"), poll_id)) > 0
+
+    async def delete_poll(self, poll_id: int) -> bool:
+        return await self._write("DELETE FROM polls WHERE id = ?", (poll_id,)) > 0
 
     # --- заявки ---
     async def create_request(self, chat_id: int, username: str | None, student_id: int) -> None:
