@@ -69,7 +69,7 @@ class Room:
     def __init__(self, hub: "Hub", info: GameInfo, owner: Player, options: dict[str, Any]):
         self.hub, self.info, self.options = hub, info, options
         self.code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(5))
-        self.game: Game = info.cls({k: v for k, v in options.items() if k != "buyin"}, _system_random)
+        self.game: Game = info.cls(dict(options), _system_random)  # игра сама отбрасывает лишнее и проверяет значения
         self.owner_id = owner.id
         self.state = "lobby"               # lobby, playing, done
         self.seat_of: dict[int, int] = {}  # игрок -> место
@@ -117,6 +117,16 @@ class Room:
         self.credited += paid
         self.settled.add(pid)
 
+    async def collect_returns(self) -> None:
+        """Игры на фишки (покер, «21») отдают фишки ушедших и выбывших по таймауту сразу — их нужно вернуть владельцам немедленно."""
+        take = getattr(self.game, "take_returns", None)
+        if take is None:
+            return
+        for seat, amount in (take() or {}).items():
+            pid = self.pid_of.get(int(seat))
+            if pid is not None and int(amount) > 0:
+                await self.credit(pid, int(amount))
+
     # --- вход и выход ---
     async def join(self, conn: Conn, buyin: int | None) -> None:
         pid, player = conn.player.id, conn.player
@@ -155,6 +165,7 @@ class Room:
         self.watchers.discard(conn)
         if pid in self.seat_of:
             returned = self.game.remove_player(pid)
+            await self.collect_returns()
             if self.state == "lobby":
                 await self.credit(pid, self.stakes.get(pid, 0))  # игра не началась — возвращается ровно вложенное
             elif returned:
@@ -197,6 +208,7 @@ class Room:
             try:
                 started = time.perf_counter()
                 await coro_factory()
+                await self.collect_returns()
                 self.touched = time.monotonic()
                 if time.perf_counter() - started > SLOW_ACT_SECONDS:
                     self.strikes += 1
@@ -235,6 +247,7 @@ class Room:
                     changed = False
                     if self.state == "playing":
                         changed = bool(self.game.tick(now))
+                        await self.collect_returns()
                         for pid, since in list(self.gone_since.items()):
                             if now - since > GRACE_SECONDS and pid in self.seat_of:
                                 self.conns.pop(pid, None)
@@ -308,10 +321,19 @@ class Hub:
     def room_list(self, allowed: set[str]) -> list[dict]:
         return [r.public() for r in self.rooms.values() if r.info.kind in allowed and not r.closed]
 
+    async def leave_finished(self, conn: Conn) -> None:
+        """Человек сидит за уже законченным столом и открывает новый — старый покидается сам."""
+        old = conn.room
+        if old is not None and (old.closed or old.state == "done"):
+            if not old.closed:
+                await old.guarded(conn, lambda: old.leave(conn))
+            conn.room = None
+
     async def create(self, conn: Conn, kind: str, raw_options: Any, buyin: int | None) -> "Room | None":
         info = self.games.get(kind)
         if info is None or info.solo or kind not in conn.player.allowed:
             raise GameError("Эта игра сейчас недоступна")
+        await self.leave_finished(conn)
         if conn.room is not None:
             raise GameError("Сначала выйди из текущего стола")
         if len(self.rooms) >= self.MAX_ROOMS:
@@ -329,6 +351,7 @@ class Hub:
         room = self.rooms.get(str(code).upper())
         if room is None or room.closed or room.info.kind not in conn.player.allowed:
             raise GameError("Такого стола нет")
+        await self.leave_finished(conn)
         if conn.room is not None and conn.room is not room:
             raise GameError("Сначала выйди из текущего стола")
         if watch:
