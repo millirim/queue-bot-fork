@@ -1097,7 +1097,8 @@ class Database:
             "(SELECT COUNT(*) FROM progress p JOIN students s ON s.id = p.student_id "
             " WHERE s.active = 1 AND p.want_since IS NOT NULL) AS wanting, "
             "(SELECT COALESCE(SUM(p.done), 0) FROM progress p JOIN students s ON s.id = p.student_id "
-            " WHERE s.active = 1) AS done"
+            " WHERE s.active = 1) AS done, "
+            "(SELECT COUNT(*) FROM suggestions WHERE status = 'new') AS suggestions"
         )
         return dict(row)
 

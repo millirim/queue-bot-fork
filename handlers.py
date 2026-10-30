@@ -8,7 +8,7 @@ import config
 from admin import close_notices, notify_minus, notify_reviewers
 from common import (
     MENU_BTN, bottom_for, btn, esc, poll_markup, poll_text, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view, short_name,
-    show, staff_kind, subgroup_buttons, subgroup_view, updated_at,
+    show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed, web_role,
 )
 from db import Database, Student
 from ranking import RULES, WANT
@@ -25,6 +25,8 @@ async def main_menu(db: Database, chat_id: int, student: Student | None) -> Inli
     """Главное меню: предметы и «Моё»; старостам и админам — их панель."""
     subjects = [btn(s.title, f"s:{s.id}") for s in await db.subjects()]
     rows = rows_of(subjects) + [[btn("👤 Моё", "my")]]
+    if web_allowed(web_role(chat_id, student)):
+        rows[-1].append(btn("🌐 Веб-панель", "aw"))
     if is_staff(chat_id, student):
         rows.append([btn(f"🛠 {panel_name(staff_kind(chat_id, student))}", "adm")])
     return kb(*rows)

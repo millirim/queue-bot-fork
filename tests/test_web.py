@@ -233,7 +233,7 @@ def test_web_command_in_bot(tmp_path):
             r = await client.post("/api/login", json={"token": token}, headers=H)
             assert r.status == 200, "по ссылке из бота можно войти"
             await h.text(dp, STAROSTA, "/web")
-            assert "только админам" in h.last(STAROSTA)[1]
+            assert "пока закрыта" in h.last(STAROSTA)[1]
             await h.text(dp, OWNER, "/admin")
             assert "aw" in h.buttons(OWNER), "в Панели Админа есть кнопка «Веб-панель»"
             await h.text(dp, STAROSTA, "/moderator")

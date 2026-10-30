@@ -1,16 +1,18 @@
 """Веб-панель: та же очередь и Панель Админа в браузере (aiohttp, работает в процессе бота).
 
 Вход — только по одноразовой ссылке из бота (/web или «🌐 Веб-панель» в панели): браузер обменивает её на
-сессию (cookie `qb_session`, HttpOnly, SameSite=Strict). Пускаем роли из WEB_ROLES (пока только админов).
+сессию (cookie `qb_session`, HttpOnly, SameSite=Strict). Пускаем роли из WEB_ROLES (по умолчанию — всех из списка группы).
 Права проверяются на каждом запросе заново, как need_staff в admin.py: роль могли снять минуту назад.
 Админ может посмотреть панель глазами старосты или студента (заголовок X-View-As) — это только понижение прав.
 Действия пишутся в тот же журнал (с пометкой «веб»), а людям приходят те же уведомления в Telegram.
 """
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
+import re
 import sys
 import time
 from urllib.parse import parse_qsl
@@ -22,11 +24,12 @@ from aiogram import Bot
 from aiogram.types import ReplyKeyboardRemove
 from aiohttp import web
 
+import broadcast
 import config
 import logsink
 import updater
 from admin import (
-    JOURNAL_PAGE, ROLE_NAMES, ROLE_NOTES, SERVER_MODES, Staff, broadcast_text, close_notices, journal_add, minus_text,
+    JOURNAL_PAGE, ROLE_NAMES, ROLE_NOTES, SERVER_MODES, Staff, close_notices, journal_add, minus_text,
     notify, notify_minus, publish_poll, remind_poll, remove_poll, finish_poll, clean_poll_options, request_plain, request_text,
     valid_emoji,
 )
@@ -34,8 +37,9 @@ from common import (
     POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_owner, kb, send, send_many, set_commands, short_name,
     staff_kind, web_allowed, web_role,
 )
-from db import ROLES, Database, Student, local_now, parse_roster
-from ranking import WANT
+from db import ROLES, SUGGESTION_STATUSES, Database, Student, local_now, parse_roster
+from handlers import places
+from ranking import RULES, WANT
 
 log = logging.getLogger(__name__)
 
@@ -209,8 +213,11 @@ async def api_login(request: web.Request) -> web.Response:
         if chat_id is None:
             raise Fail("Ссылка устарела или уже использована — попроси у бота новую: /web", 401)
     student = await db.student_by_chat(chat_id)
-    if not web_allowed(web_role(chat_id, student)):
-        raise Fail("Веб-панель пока доступна только админам", 403)
+    role = web_role(chat_id, student)
+    if role is None:
+        raise Fail("Сначала выбери себя из списка группы в боте (/start) — после принятия заявки панель откроется", 403)
+    if not web_allowed(role):
+        raise Fail("Веб-панель для твоей роли пока закрыта", 403)
     session = await db.web_token(chat_id, "session", SESSION_TTL)
     log.info("Вход в веб-панель (id %s)", chat_id)
     response = web.json_response({"ok": True})
@@ -237,7 +244,12 @@ async def api_me(request: web.Request) -> web.Response:
         "role": v.role, "view": v.view, "views": views, "owner": is_owner(v.chat_id),
         "group": config.GROUP_NO, "version": updater.current_version(),
         "sessions": await db_of(request).web_session_count(v.chat_id),
+        "rules": RULE_LINES,
     })
+
+
+# Правила очереди из ranking.RULES — строками без разметки (в вебе их рисует интерфейс).
+RULE_LINES = [html.unescape(re.sub(r"<[^>]+>", "", line)) for line in RULES.splitlines() if line.strip()]
 
 
 # ================= обзор =================
@@ -284,13 +296,30 @@ async def queue_json(db: Database, v: Viewer, subject) -> dict:
     if me:
         until = await db.undo_until(me_id, subject.id)
         me.update(undo_until=iso(until), can_want=not me["wants"] and me["done"] < subject.total,
-                  can_done=me["done"] < subject.total, can_minus=me["done"] > 0 and until is None)
+                  can_done=me["done"] < subject.total, can_minus=me["done"] > 0 and until is None,
+                  swap=await my_swap(db, subject, me_id, me["done"]))
     data = {"subject": subject_json(subject), "rows": out, "me": me, "editable": v.at_least("starosta"),
             "subgroups": any(r.subgroup for r in rows), "at": iso(local_now())}
     if v.at_least("admin"):  # обмены местами: админ может разорвать
         data["swaps"] = [{"id": w.id, "a": (await db.get_student(w.from_id)).name, "b": (await db.get_student(w.to_id)).name}
                          for w in await db.active_swaps(subject.id)]
     return data
+
+
+async def my_swap(db: Database, subject, student_id: int, done: int) -> dict:
+    """Обмен местами глазами участника — как swap_block в handlers.py."""
+    names = lambda i: short_name(next((r.name for r in rows if r.student_id == i), "—"))  # noqa: E731
+    rows = await db.queue(subject.id)
+    if active := await db.active_swaps(subject.id, student_id):
+        w = active[0]
+        return {"state": "active", "id": w.id, "with": names(w.partner(student_id)),
+                "working": any(r.swapped and r.student_id == student_id for r in rows)}
+    pending = await db.pending_swaps(subject.id, student_id)
+    if out := [w for w in pending if w.from_id == student_id]:
+        return {"state": "sent", "id": out[0].id, "with": names(out[0].to_id)}
+    incoming = [{"id": w.id, "from": names(w.from_id)} for w in pending if w.to_id == student_id]
+    blocked = await db.swap_blocked(student_id, subject.id) if done < subject.total else "все работы сданы"
+    return {"state": None, "incoming": incoming, "blocked": blocked}
 
 
 async def api_subjects(request: web.Request) -> web.Response:
@@ -356,8 +385,11 @@ async def api_my(request: web.Request) -> web.Response:
     for s in await db.subjects():
         if st := await db.standing(s.id, v.student.id):
             items.append({**subject_json(s), "done": st.row.done, "wants": st.row.wants, "place": st.place,
-                          "of": st.total, "sub_place": st.sub_place, "sub_of": st.sub_total})
-    return web.json_response({"student": student_json(v.student), "subjects": items})
+                          "of": st.total, "sub_place": st.sub_place, "sub_of": st.sub_total, "swapped": st.row.swapped,
+                          "swap": await my_swap(db, s, v.student.id, st.row.done)})
+    minus = [{"id": m.id, "subject": subject_json(m.subject), "reason": m.reason}
+             for m in await db.pending_minus() if m.student.id == v.student.id]
+    return web.json_response({"student": student_json(v.student), "subjects": items, "minus": minus})
 
 
 # ================= заявки =================
@@ -621,21 +653,136 @@ async def api_progress(request: web.Request) -> web.Response:
 
 
 # ================= рассылка =================
+PHOTO_MAX = 10 * 1024 * 1024  # Telegram принимает фото до 10 МБ
+PHOTO_TYPES = {b"\xff\xd8\xff": "jpeg", b"\x89PNG": "png", b"RIFF": "webp"}
+
+
 async def api_broadcast_info(request: web.Request) -> web.Response:
     v = await need(request, "starosta")
-    return web.json_response({"recipients": len(await db_of(request).member_chats()), "signature": v.staff.signature})
+    return web.json_response({"recipients": len(await db_of(request).member_chats()), "signature": v.staff.signature,
+                              "max_photos": broadcast.MAX_PHOTOS, "text_limit": broadcast.TEXT_LIMIT - 100})
+
+
+async def read_broadcast(request: web.Request) -> tuple[str, list[bytes], bool]:
+    """Текст (HTML из редактора), картинки и «только себе». Форма multipart: html, test, photo (несколько)."""
+    if not request.content_type.startswith("multipart/"):
+        data = await body(request)
+        return str(data.get("html", "")), [], bool(data.get("test"))
+    raw, photos, test = "", [], False
+    reader = await request.multipart()
+    while part := await reader.next():
+        if part.name == "html":
+            raw = (await part.read(decode=True)).decode("utf-8", "replace")[:100_000]
+        elif part.name == "test":
+            test = (await part.text()) == "1"
+        elif part.name == "photo":
+            if len(photos) >= broadcast.MAX_PHOTOS:
+                raise Fail(f"Не больше {broadcast.MAX_PHOTOS} картинок")
+            data = bytearray()
+            while chunk := await part.read_chunk():
+                data += chunk
+                if len(data) > PHOTO_MAX:
+                    raise Fail("Картинка больше 10 МБ — Telegram её не примет")
+            if not any(bytes(data).startswith(sig) for sig in PHOTO_TYPES):
+                raise Fail("Картинки — только JPEG, PNG или WebP")
+            photos.append(bytes(data))
+    return raw, photos, test
 
 
 async def api_broadcast(request: web.Request) -> web.Response:
+    """Рассылка из веба: форматирование из редактора (broadcast.clean_html) и до 10 картинок. test — только себе."""
     v = await need(request, "starosta")
     db = db_of(request)
-    text = str((await body(request)).get("text", "")).strip()[:3000]
-    if not text:
-        raise Fail("Напиши текст сообщения")
-    chat_ids = await db.member_chats()
-    sent = await send_many(bot_of(request), chat_ids, broadcast_text(v.staff, text))
-    await journal(db, v, f"рассылка (дошла {sent} из {len(chat_ids)}): {text[:80]}")
-    return web.json_response({"sent": sent, "total": len(chat_ids)})
+    raw, photos, test = await read_broadcast(request)
+    text, plain = broadcast.clean_html(raw)
+    if not plain and not photos:
+        raise Fail("Напиши текст или добавь картинку")
+    if len(plain) > broadcast.TEXT_LIMIT - 100:
+        raise Fail(f"Слишком длинно: {len(plain)} символов, можно до {broadcast.TEXT_LIMIT - 100}")
+    draft = broadcast.Draft("web", html=text, plain=plain, photos=photos)
+    chat_ids = [v.chat_id] if test else await db.member_chats()
+    sent = await broadcast.deliver_all(bot_of(request), chat_ids, v.staff.signature, draft)
+    if not test:
+        await journal(db, v, f"рассылка (дошла {sent} из {len(chat_ids)}): {broadcast.describe(draft)}")
+    return web.json_response({"sent": sent, "total": len(chat_ids), "test": test})
+
+
+# ================= обмен местами =================
+async def api_swap_candidates(request: web.Request) -> web.Response:
+    """С кем можно поменяться — как cb_swap_pick."""
+    v = await need_student(request)
+    db = db_of(request)
+    subject = await load_subject(db, request)
+    if reason := await db.swap_blocked(v.student.id, subject.id):
+        raise Fail(f"Нельзя: {reason}", 409)
+    out = []
+    for place, row in enumerate(await db.queue(subject.id), 1):
+        if row.student_id != v.student.id and row.in_bot and not await db.swap_blocked(row.student_id, subject.id):
+            out.append({"id": row.student_id, "place": place, "name": row.name, "done": row.done, "wants": row.wants})
+    return web.json_response(out)
+
+
+async def api_swap_propose(request: web.Request) -> web.Response:
+    """Предложить обмен — как cb_swap_propose: второму приходит сообщение с кнопками (ответить можно и в вебе)."""
+    v = await need_student(request)
+    db, bot = db_of(request), bot_of(request)
+    subject = await load_subject(db, request)
+    try:
+        target = await db.get_student(int((await body(request)).get("to")))
+    except (TypeError, ValueError):
+        target = None
+    if target is None or not target.linked or not target.active:
+        raise Fail("Этого человека нет в боте", 404)
+    result = await db.propose_swap(v.student.id, target.id, subject.id)
+    if isinstance(result, str):
+        raise Fail(result, 409)
+    where = await places(db, subject.id, v.student.id, target.id)
+    sent = await send(
+        bot, target.chat_id,
+        f"🔁 <b>{esc(short_name(v.student.name))}</b> предлагает поменяться местами по {esc(subject.title)}: "
+        f"ты №{where[target.id]} ↔ он(а) №{where[v.student.id]}.\n\nМеняетесь только вы двое, остальные места не двигаются. "
+        "Обмен действует, пока кто-то из вас не сдаст; отменить можно в любой момент. Предложение живёт сутки.",
+        kb([btn("✅ Согласен", f"sxy:{result}"), btn("❌ Нет", f"sxn:{result}")]),
+    )
+    if sent is None:
+        await db.end_swap(result, "cancelled")
+        raise Fail("Не получилось отправить предложение — человек закрыл бота", 409)
+    return web.json_response(await queue_json(db, v, subject))
+
+
+async def load_my_swap(request: web.Request, db: Database, v: Viewer):
+    swap = await db.get_swap(int_arg(request, "wid"))
+    if swap is None or v.student.id not in (swap.from_id, swap.to_id) or swap.status not in ("pending", "active"):
+        raise Fail("Это уже не действует", 409)
+    return swap
+
+
+async def api_swap_accept(request: web.Request) -> web.Response:
+    v = await need_student(request)
+    db, bot = db_of(request), bot_of(request)
+    swap = await load_my_swap(request, db, v)
+    result = await db.accept_swap(swap.id, v.student.id)
+    if isinstance(result, str):
+        raise Fail(result, 409)
+    subject, other = await db.get_subject(result.subject_id), await db.get_student(result.partner(v.student.id))
+    where = await places(db, subject.id, v.student.id, other.id)
+    await send(bot, other.chat_id, f"🔁 <b>{esc(short_name(v.student.name))}</b> согласился(лась) поменяться по {esc(subject.title)}. "
+               f"Теперь ты №{where[other.id]}, он(а) №{where[v.student.id]}.", kb([btn("📋 К очереди", f"s:{subject.id}")]))
+    return web.json_response(await queue_json(db, v, subject))
+
+
+async def api_swap_end(request: web.Request) -> web.Response:
+    """Отказаться от предложения, отозвать своё или отменить действующий обмен — как cb_swap_end."""
+    v = await need_student(request)
+    db, bot = db_of(request), bot_of(request)
+    swap = await load_my_swap(request, db, v)
+    declined = swap.status == "pending" and swap.to_id == v.student.id
+    await db.end_swap(swap.id, "declined" if declined else "cancelled")
+    subject, other = await db.get_subject(swap.subject_id), await db.get_student(swap.partner(v.student.id))
+    theirs = ("отказался(лась) от обмена" if declined else
+              "отменил(а) обмен" if swap.status == "active" else "отозвал(а) предложение обмена")
+    await send(bot, other.chat_id, f"🔁 {esc(short_name(v.student.name))} {theirs} по {esc(subject.title)}.")
+    return web.json_response(await queue_json(db, v, subject))
 
 
 async def api_swap_cancel(request: web.Request) -> web.Response:
@@ -735,6 +882,104 @@ async def api_poll_delete(request: web.Request) -> web.Response:
     v = await need(request, "admin")
     db = db_of(request)
     await remove_poll(db, v.staff, await load_poll(request, db), " · веб")
+    return web.json_response({"ok": True})
+
+
+# ================= предложения =================
+SUGGESTION_NAMES = {"new": "новое", "accepted": "принято", "done": "сделано", "rejected": "отклонено"}
+SUGGESTIONS_PER_DAY = 5
+_suggested: dict[int, list[float]] = {}  # chat_id → когда писал; только в памяти, чтобы у анонимных не было следа
+
+
+def suggestion_json(sg, v: Viewer) -> dict:
+    mine = sg.author is not None and v.student is not None and sg.author.id == v.student.id
+    return {
+        "id": sg.id, "text": sg.text, "created_at": sg.created_at, "status": sg.status, "public": sg.public,
+        "anonymous": sg.author is None, "author": sg.author.name if sg.author else None, "mine": mine,
+        "reply": sg.reply, "reply_by": sg.reply_by, "reply_at": sg.reply_at, "votes": sg.votes, "voted": sg.voted,
+        "can_vote": sg.public and v.student is not None and not mine and sg.status != "rejected",
+        "can_delete": mine or v.at_least("admin"),
+    }
+
+
+async def api_suggestions(request: web.Request) -> web.Response:
+    v = await need(request)
+    items = await db_of(request).suggestions(v.student.id if v.student else None, staff=v.at_least("starosta"))
+    return web.json_response([suggestion_json(sg, v) for sg in items])
+
+
+async def api_suggestion_add(request: web.Request) -> web.Response:
+    """Новое предложение. Анонимное — без автора в базе и в журнале; старостам и админам — уведомление в Telegram."""
+    v = await need(request)
+    db = db_of(request)
+    data = await body(request)
+    text = str(data.get("text", "")).strip()
+    text = "\n".join(" ".join(line.split()) for line in text.splitlines()).strip()
+    anonymous, public = bool(data.get("anonymous")), bool(data.get("public", True))
+    if not 5 <= len(text) <= 2000:
+        raise Fail("Предложение — от 5 до 2000 символов")
+    if not anonymous and v.student is None:
+        raise Fail("Подписанное предложение — только от человека из списка группы; отправь анонимно", 403)
+    now = time.time()
+    recent = [t for t in _suggested.get(v.chat_id, []) if now - t < 24 * 3600]
+    if len(recent) >= SUGGESTIONS_PER_DAY:
+        raise Fail(f"Не больше {SUGGESTIONS_PER_DAY} предложений в сутки", 429)
+    _suggested[v.chat_id] = [*recent, now]
+    sid = await db.add_suggestion(None if anonymous else v.student.id, text, public)
+    who = "анонимно" if anonymous else f"от {esc(v.student.name)}"
+    where = "видно всей группе" if public else "только старостам и админам"
+    reviewers = sorted((config.ADMIN_IDS | set(await db.staff_chats())) - {v.chat_id})
+    await send_many(bot_of(request), reviewers,
+                    f"💡 <b>Новое предложение</b> #{sid} ({who}, {where})\n\n{esc(text[:1500])}\n\n"
+                    "<i>Ответить — в веб-панели → Предложения.</i>")
+    return web.json_response(suggestion_json(await db.get_suggestion(sid, v.student.id if v.student else None), v))
+
+
+async def load_suggestion(request: web.Request, db: Database, v: Viewer):
+    sg = await db.get_suggestion(int_arg(request, "gid"), v.student.id if v.student else None)
+    visible = sg and (v.at_least("starosta") or sg.public or (sg.author and v.student and sg.author.id == v.student.id))
+    if not visible:
+        raise Fail("Такого предложения нет", 404)
+    return sg
+
+
+async def api_suggestion_answer(request: web.Request) -> web.Response:
+    v = await need(request, "starosta")
+    db = db_of(request)
+    sg = await load_suggestion(request, db, v)
+    data = await body(request)
+    status = data.get("status", sg.status)
+    reply = " ".join(str(data.get("reply") or "").split())[:1000]
+    if status not in SUGGESTION_STATUSES:
+        raise Fail("Нет такого статуса")
+    await db.answer_suggestion(sg.id, status, reply, v.staff.signature)
+    await journal(db, v, f"предложение #{sg.id}: {SUGGESTION_NAMES[status]}" + (f" — «{reply[:80]}»" if reply else ""))
+    if sg.author:
+        await notify(bot_of(request), sg.author,
+                     f"💡 Твоё предложение #{sg.id} — <b>{SUGGESTION_NAMES[status]}</b> ({esc(v.staff.signature)})."
+                     + (f"\n\nОтвет: {esc(reply)}" if reply else "") + f"\n\n<i>{esc(sg.text[:300])}</i>")
+    return web.json_response(suggestion_json(await db.get_suggestion(sg.id, v.student.id if v.student else None), v))
+
+
+async def api_suggestion_vote(request: web.Request) -> web.Response:
+    v = await need_student(request)
+    db = db_of(request)
+    sg = await load_suggestion(request, db, v)
+    if not suggestion_json(sg, v)["can_vote"]:
+        raise Fail("Это предложение поддержать нельзя", 409)
+    await db.support_suggestion(sg.id, v.student.id, bool((await body(request)).get("on")))
+    return web.json_response(suggestion_json(await db.get_suggestion(sg.id, v.student.id), v))
+
+
+async def api_suggestion_delete(request: web.Request) -> web.Response:
+    v = await need(request)
+    db = db_of(request)
+    sg = await load_suggestion(request, db, v)
+    if not suggestion_json(sg, v)["can_delete"]:
+        raise Fail("Удалить может автор или админ", 403)
+    await db.delete_suggestion(sg.id)
+    if v.at_least("admin") and not suggestion_json(sg, v)["mine"]:
+        await journal(db, v, f"предложение #{sg.id} удалено")
     return web.json_response({"ok": True})
 
 
@@ -893,7 +1138,7 @@ async def index(request: web.Request) -> web.FileResponse:
 
 
 def make_app(db: Database, bot: Bot) -> web.Application:
-    app = web.Application(middlewares=[middleware], client_max_size=256 * 1024)
+    app = web.Application(middlewares=[middleware], client_max_size=1024 * 1024)  # картинки рассылки читаются по частям
     app[DB], app[BOT] = db, bot
     r = app.router
     r.add_get("/", index)
@@ -916,6 +1161,15 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_post("/api/queue/{sid:\\d+}/minus", api_ask_minus)
     r.add_post("/api/progress/{sid:\\d+}/{pid:\\d+}", api_progress)
     r.add_post("/api/swaps/{wid:\\d+}/cancel", api_swap_cancel)
+    r.add_get("/api/queue/{sid:\\d+}/swap", api_swap_candidates)
+    r.add_post("/api/queue/{sid:\\d+}/swap", api_swap_propose)
+    r.add_post("/api/swaps/{wid:\\d+}/accept", api_swap_accept)
+    r.add_post("/api/swaps/{wid:\\d+}/end", api_swap_end)
+    r.add_get("/api/suggestions", api_suggestions)
+    r.add_post("/api/suggestions", api_suggestion_add)
+    r.add_post("/api/suggestions/{gid:\\d+}/answer", api_suggestion_answer)
+    r.add_post("/api/suggestions/{gid:\\d+}/vote", api_suggestion_vote)
+    r.add_delete("/api/suggestions/{gid:\\d+}", api_suggestion_delete)
     r.add_get("/api/polls", api_polls)
     r.add_post("/api/polls", api_poll_add)
     r.add_post("/api/polls/{pid:\\d+}/vote", api_poll_vote)
