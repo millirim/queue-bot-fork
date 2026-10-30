@@ -12,7 +12,7 @@ import handlers
 import logsink
 import updater
 import web
-from common import BASE_COMMANDS, set_commands, staff_kind
+from common import BASE_COMMANDS, set_commands, set_menu_button, staff_kind
 from db import Database
 
 log = logging.getLogger("queue-bot")
@@ -49,6 +49,7 @@ async def main() -> None:
 
     # У всех — обычные команды; у старост добавляется /moderator, у админов — /admin.
     await bot.set_my_commands(BASE_COMMANDS)
+    await set_menu_button(bot, None, None)  # общая кнопка «Панель», если веб открыт студентам и есть https
     for chat_id in config.ADMIN_IDS:
         await set_commands(bot, chat_id, "admin")
     for student in await db.students():

@@ -162,6 +162,27 @@ CREATE TABLE IF NOT EXISTS poll_votes (
     voted_at   TEXT NOT NULL,
     PRIMARY KEY (poll_id, student_id)
 );
+
+-- Предложения из веб-панели. Анонимное хранится без автора совсем: узнать, кто написал, нельзя даже по базе.
+CREATE TABLE IF NOT EXISTS suggestions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    author_id  INTEGER REFERENCES students(id) ON DELETE SET NULL,  -- NULL — анонимно (или автора удалили)
+    anonymous  INTEGER NOT NULL DEFAULT 0,
+    public     INTEGER NOT NULL DEFAULT 1,  -- 1 — видно всей группе (можно поддержать), 0 — только старостам и админам
+    text       TEXT NOT NULL,
+    created_at TEXT NOT NULL,               -- ISO, местное время
+    status     TEXT NOT NULL DEFAULT 'new', -- new / accepted / done / rejected
+    reply      TEXT,                        -- ответ старосты или админа
+    reply_by   TEXT,                        -- подпись ответившего («староста Иванова Анна»)
+    reply_at   TEXT
+);
+
+-- «Поддерживаю» под предложением: один голос на человека.
+CREATE TABLE IF NOT EXISTS suggestion_votes (
+    suggestion_id INTEGER NOT NULL REFERENCES suggestions(id) ON DELETE CASCADE,
+    student_id    INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    PRIMARY KEY (suggestion_id, student_id)
+);
 """
 
 # Таблицы прошлых версий. Ботом тогда никто не пользовался — пересоздаём.
@@ -169,6 +190,7 @@ OLD_TABLES = ("payments", "queue", "lessons", "works", "users", "audit", "progre
 
 
 ROLES = ("user", "starosta", "admin")
+SUGGESTION_STATUSES = ("new", "accepted", "done", "rejected")
 
 
 @dataclass
@@ -223,6 +245,21 @@ class Poll:
     created_by: str
     closed: bool
     options: list[tuple[int, str]]  # (id варианта, текст) в порядке показа
+
+
+@dataclass
+class Suggestion:
+    id: int
+    author: "Student | None"  # None — анонимно
+    public: bool
+    text: str
+    created_at: str
+    status: str
+    reply: str | None
+    reply_by: str | None
+    reply_at: str | None
+    votes: int = 0
+    voted: bool = False       # поддержал ли смотрящий
 
 
 @dataclass
@@ -957,6 +994,59 @@ class Database:
             with open(archive, "rb") as f:
                 return name, f.read()
 
+    # --- предложения ---
+    async def add_suggestion(self, author_id: int | None, text: str, public: bool) -> int:
+        """author_id=None — анонимно: автор нигде не записывается."""
+        cur = await self.conn.execute(
+            "INSERT INTO suggestions (author_id, anonymous, public, text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (author_id, int(author_id is None), int(public), text, local_now().isoformat(timespec="seconds")),
+        )
+        await self.conn.commit()
+        return cur.lastrowid
+
+    async def _suggestion(self, row, viewer_id: int | None) -> Suggestion:
+        votes = (await self._one("SELECT COUNT(*) AS c FROM suggestion_votes WHERE suggestion_id = ?", (row["id"],)))["c"]
+        voted = viewer_id is not None and bool(await self._one(
+            "SELECT 1 FROM suggestion_votes WHERE suggestion_id = ? AND student_id = ?", (row["id"], viewer_id)))
+        author = await self.get_student(row["author_id"]) if row["author_id"] is not None else None
+        return Suggestion(row["id"], author, bool(row["public"]), row["text"], row["created_at"], row["status"],
+                          row["reply"], row["reply_by"], row["reply_at"], votes, voted)
+
+    async def get_suggestion(self, suggestion_id: int, viewer_id: int | None = None) -> Suggestion | None:
+        row = await self._one("SELECT * FROM suggestions WHERE id = ?", (suggestion_id,))
+        return await self._suggestion(row, viewer_id) if row else None
+
+    async def suggestions(self, viewer_id: int | None, staff: bool, limit: int = 200) -> list[Suggestion]:
+        """Новые сверху. Старостам и админам — все; остальным — открытые всей группе и свои."""
+        if staff:
+            rows = await self._all("SELECT * FROM suggestions ORDER BY id DESC LIMIT ?", (limit,))
+        else:
+            rows = await self._all("SELECT * FROM suggestions WHERE public = 1 OR author_id = ? ORDER BY id DESC LIMIT ?",
+                                   (viewer_id if viewer_id is not None else -1, limit))
+        return [await self._suggestion(r, viewer_id) for r in rows]
+
+    async def answer_suggestion(self, suggestion_id: int, status: str, reply: str | None, by: str) -> bool:
+        assert status in SUGGESTION_STATUSES
+        return await self._write(
+            "UPDATE suggestions SET status = ?, reply = ?, reply_by = ?, reply_at = ? WHERE id = ?",
+            (status, reply or None, by if reply or status != "new" else None, local_now().isoformat(timespec="seconds"),
+             suggestion_id),
+        ) > 0
+
+    async def support_suggestion(self, suggestion_id: int, student_id: int, on: bool) -> None:
+        if on:
+            await self._write("INSERT OR IGNORE INTO suggestion_votes (suggestion_id, student_id) VALUES (?, ?)",
+                              (suggestion_id, student_id))
+        else:
+            await self._write("DELETE FROM suggestion_votes WHERE suggestion_id = ? AND student_id = ?",
+                              (suggestion_id, student_id))
+
+    async def delete_suggestion(self, suggestion_id: int) -> bool:
+        return await self._write("DELETE FROM suggestions WHERE id = ?", (suggestion_id,)) > 0
+
+    async def new_suggestions(self) -> int:
+        return (await self._one("SELECT COUNT(*) AS c FROM suggestions WHERE status = 'new'"))["c"]
+
     # --- веб-панель ---
     @staticmethod
     def _token_hash(token: str) -> str:
@@ -1007,7 +1097,8 @@ class Database:
             "(SELECT COUNT(*) FROM progress p JOIN students s ON s.id = p.student_id "
             " WHERE s.active = 1 AND p.want_since IS NOT NULL) AS wanting, "
             "(SELECT COALESCE(SUM(p.done), 0) FROM progress p JOIN students s ON s.id = p.student_id "
-            " WHERE s.active = 1) AS done"
+            " WHERE s.active = 1) AS done, "
+            "(SELECT COUNT(*) FROM suggestions WHERE status = 'new') AS suggestions"
         )
         return dict(row)
 

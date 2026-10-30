@@ -233,7 +233,7 @@ def test_web_command_in_bot(tmp_path):
             r = await client.post("/api/login", json={"token": token}, headers=H)
             assert r.status == 200, "по ссылке из бота можно войти"
             await h.text(dp, STAROSTA, "/web")
-            assert "только админам" in h.last(STAROSTA)[1]
+            assert "пока закрыта" in h.last(STAROSTA)[1]
             await h.text(dp, OWNER, "/admin")
             assert "aw" in h.buttons(OWNER), "в Панели Админа есть кнопка «Веб-панель»"
             await h.text(dp, STAROSTA, "/moderator")
@@ -279,6 +279,7 @@ def test_mini_app_login_checks_telegram_signature(tmp_path, monkeypatch):
             assert r.status == 403, "без заголовка защиты от CSRF — отказ"
         finally:
             await client.close()
+            await db.close()
     run(scenario())
 
 
@@ -349,6 +350,7 @@ def test_polls_in_web(tmp_path):
         finally:
             config.WEB_ROLES.discard("user")
             await client.close()
+            await db.close()
     run(scenario())
 
 
@@ -381,4 +383,94 @@ def test_swap_marks_and_admin_can_break_it_in_web(tmp_path):
             assert "swaps" not in await (await client.get(f"/api/queue/{subject.id}")).json()
         finally:
             await client.close()
+            await db.close()
+    run(scenario())
+
+
+def test_suggestions_anonymous_public_and_answers(tmp_path, monkeypatch):
+    import web as web_module
+    monkeypatch.setattr(config, "WEB_ROLES", {"admin", "starosta", "user"})
+    monkeypatch.setattr(web_module, "_suggested", {})
+
+    async def scenario():
+        db, h, client, people = await setup(tmp_path)
+        try:
+            await login(client, db, STUDENT)
+            r = await client.post("/api/suggestions", json={"text": "Секретная идея", "anonymous": True, "public": True}, headers=H)
+            anon = await r.json()
+            assert r.status == 200 and anon["anonymous"] and anon["author"] is None and not anon["mine"]
+            row = await db._one("SELECT author_id, anonymous FROM suggestions WHERE id = ?", (anon["id"],))
+            assert row["author_id"] is None and row["anonymous"] == 1, "анонимное — без автора даже в базе"
+            assert any(m[0] == OWNER and "Новое предложение" in m[1] and "анонимно" in m[1] for m in h.session.sent), "админу пришло уведомление"
+            assert "Студентов" not in " ".join(m[1] or "" for m in h.session.sent), "имени автора нет нигде"
+            r = await client.post("/api/suggestions", json={"text": "Только старостам: про БД", "public": False}, headers=H)
+            private = await r.json()
+            assert private["mine"] and private["author"].startswith("Студентов")
+            assert (await client.post("/api/suggestions", json={"text": "ой"}, headers=H)).status == 400, "слишком коротко"
+            assert (await client.post(f"/api/suggestions/{private['id']}/answer", json={"status": "done"}, headers=H)).status == 403
+            assert (await client.post(f"/api/suggestions/{anon['id']}/vote", json={"on": True}, headers=H)).status == 200, "чужое открытое можно поддержать"
+            assert (await client.post(f"/api/suggestions/{private['id']}/vote", json={"on": True}, headers=H)).status == 409, "своё — нельзя"
+            for i in range(3):
+                await client.post("/api/suggestions", json={"text": f"Идея номер {i}", "anonymous": True}, headers=H)
+            assert (await client.post("/api/suggestions", json={"text": "Шестая идея", "anonymous": True}, headers=H)).status == 429, "не больше 5 в сутки"
+            client.session.cookie_jar.clear()
+
+            await db.set_role(people["Старостина"], "user")
+            await login(client, db, STAROSTA)  # теперь обычный студент
+            seen = {x["id"] for x in await (await client.get("/api/suggestions")).json()}
+            assert anon["id"] in seen and private["id"] not in seen, "закрытое чужое студенту не видно"
+            client.session.cookie_jar.clear()
+
+            await login(client, db, OWNER)
+            assert (await (await client.get("/api/badges")).json())["suggestions"] == 5
+            r = await client.post(f"/api/suggestions/{private['id']}/answer", json={"status": "accepted", "reply": "Сделаем"}, headers=H)
+            assert (await r.json())["reply_by"].startswith("админ")
+            assert any(m[0] == STUDENT and "принято" in m[1] and "Сделаем" in m[1] for m in h.session.sent), "автору — ответ в бот"
+            assert "предложение #" in (await db.journal(1))[0].text
+            assert (await client.delete(f"/api/suggestions/{anon['id']}", headers=H)).status == 200, "админ может удалить"
+        finally:
+            await client.close()
+            await db.close()
+    run(scenario())
+
+
+def test_student_swaps_from_web(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WEB_ROLES", {"admin", "starosta", "user"})
+
+    async def scenario():
+        db, h, client, people = await setup(tmp_path)
+        try:
+            subject = (await db.subjects())[0]
+            await login(client, db, STUDENT)
+            cands = await (await client.get(f"/api/queue/{subject.id}/swap")).json()
+            assert people["Старостина"] in [c["id"] for c in cands] and people["Студентов"] not in [c["id"] for c in cands]
+            r = await client.post(f"/api/queue/{subject.id}/swap", json={"to": people["Старостина"]}, headers=H)
+            me = (await r.json())["me"]
+            assert me["swap"]["state"] == "sent"
+            assert any(m[0] == STAROSTA and "предлагает поменяться" in m[1] for m in h.session.sent), "второму — предложение в бот"
+            client.session.cookie_jar.clear()
+
+            await login(client, db, STAROSTA)
+            assert (await (await client.get("/api/badges")).json())["swaps"] == 1
+            q = await (await client.get(f"/api/queue/{subject.id}")).json()
+            incoming = q["me"]["swap"]["incoming"]
+            assert len(incoming) == 1
+            r = await client.post(f"/api/swaps/{incoming[0]['id']}/accept", json={}, headers=H)
+            assert (await r.json())["me"]["swap"]["state"] == "active"
+            assert any(m[0] == STUDENT and "согласился" in m[1] for m in h.session.sent)
+            client.session.cookie_jar.clear()
+
+            await login(client, db, OWNER)  # чужой обмен через «end» не тронуть
+            assert (await client.post(f"/api/swaps/{incoming[0]['id']}/end", json={}, headers=H)).status == 409
+            client.session.cookie_jar.clear()
+            await login(client, db, STUDENT)
+            r = await client.post(f"/api/swaps/{incoming[0]['id']}/end", json={}, headers=H)
+            assert (await r.json())["me"]["swap"]["state"] is None and (await db.get_swap(incoming[0]["id"])).status == "cancelled"
+            my = await (await client.get("/api/my")).json()
+            assert all("swap" in x for x in my["subjects"]) and my["minus"] == []
+            rules = (await (await client.get("/api/me")).json())["rules"]
+            assert rules and all("<" not in r for r in rules), "правила — текстом без разметки"
+        finally:
+            await client.close()
+            await db.close()
     run(scenario())

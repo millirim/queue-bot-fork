@@ -15,8 +15,10 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendDocument, SendMessage
-from aiogram.types import CallbackQuery, Chat, Message, Update
+from aiogram.methods import (
+    AnswerCallbackQuery, CopyMessage, CopyMessages, EditMessageText, SendDocument, SendMediaGroup, SendMessage, SendPhoto,
+)
+from aiogram.types import CallbackQuery, Chat, Message, MessageId, PhotoSize, Update
 from aiogram.types import User as TgUser
 
 
@@ -30,6 +32,8 @@ class FakeSession(BaseSession):
         self.alerts: list[str] = []        # тексты всплывающих подсказок (answer_callback_query)
         self.documents: list[tuple] = []   # (chat_id, имя файла, байты, подпись)
         self.commands: dict = {}           # chat_id → список команд меню (None — сброшены)
+        self.copies: list[tuple] = []      # (chat_id, from_chat_id, [message_id…], caption) — copy_message(s)
+        self.photos: list[tuple] = []      # (chat_id, [файл или file_id…], подпись) — send_photo и send_media_group
         self.mid = 1000
 
     def _message(self, chat_id, text):
@@ -45,6 +49,22 @@ class FakeSession(BaseSession):
         if isinstance(method, SendDocument):
             self.documents.append((method.chat_id, method.document.filename, method.document.data, method.caption))
             return self._message(method.chat_id, "doc")
+        if isinstance(method, CopyMessage):
+            self.copies.append((method.chat_id, method.from_chat_id, [method.message_id], method.caption))
+            self.mid += 1
+            return MessageId(message_id=self.mid)
+        if isinstance(method, CopyMessages):
+            self.copies.append((method.chat_id, method.from_chat_id, list(method.message_ids), None))
+            return [MessageId(message_id=i + 5000) for i in method.message_ids]
+        if isinstance(method, (SendPhoto, SendMediaGroup)):
+            items = [method.photo] if isinstance(method, SendPhoto) else [m.media for m in method.media]
+            caption = method.caption if isinstance(method, SendPhoto) else method.media[0].caption
+            self.photos.append((method.chat_id, items, caption))
+            sent = []
+            for i in range(len(items)):
+                msg = self._message(method.chat_id, None)
+                sent.append(msg.model_copy(update={"photo": [PhotoSize(file_id=f"photo-{self.mid}-{i}", file_unique_id=f"u{self.mid}{i}", width=10, height=10)]}))
+            return sent[0] if isinstance(method, SendPhoto) else sent
         name = type(method).__name__
         if name in ("SetMyCommands", "DeleteMyCommands"):
             chat = getattr(method.scope, "chat_id", None)

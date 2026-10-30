@@ -10,7 +10,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import (
     BotCommand, BotCommandScopeChat, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
-    ReplyKeyboardMarkup, ReplyKeyboardRemove, MenuButtonCommands, MenuButtonWebApp, WebAppInfo,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove, MenuButtonCommands, MenuButtonDefault, MenuButtonWebApp, WebAppInfo,
 )
 
 import config
@@ -81,13 +81,21 @@ def staff_kind(chat_id: int, student: Student | None) -> str | None:
     return "moderator" if student and student.starosta else None
 
 
-async def set_menu_button(bot: Bot, chat_id: int, role: str | None) -> None:
-    """Кнопка рядом с полем ввода: «Панель» (мини-приложение), если этой роли открыта веб-панель по https; иначе обычная."""
+def menu_button_for(role: str | None):
+    """«Панель» (мини-приложение), если этой роли открыта веб-панель по https; иначе обычная кнопка команд."""
+    if web_allowed(role) and config.WEB_URL.startswith("https://"):
+        return MenuButtonWebApp(text="Панель", web_app=WebAppInfo(url=config.WEB_URL))
+    return MenuButtonCommands()
+
+
+async def set_menu_button(bot: Bot, chat_id: int | None, role: str | None) -> None:
+    """Кнопка рядом с полем ввода. chat_id=None — общая для всех (как для студентов);
+    role=None — у человека своей нет, работает общая."""
     try:
-        if web_allowed(role) and config.WEB_URL.startswith("https://"):
-            button = MenuButtonWebApp(text="Панель", web_app=WebAppInfo(url=config.WEB_URL))
-        else:
-            button = MenuButtonCommands()
+        if chat_id is None:
+            await bot.set_chat_menu_button(menu_button=menu_button_for("user"))
+            return
+        button = MenuButtonDefault() if role is None else menu_button_for(role)
         await bot.set_chat_menu_button(chat_id=chat_id, menu_button=button)
     except TelegramAPIError as e:
         log.info("Кнопка меню для %s не обновлена: %s", chat_id, e)

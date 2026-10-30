@@ -17,6 +17,7 @@ from aiogram.types import (
     BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message, ReplyKeyboardRemove, WebAppInfo,
 )
 
+import broadcast
 import config
 from common import (
     MENU_BTN, bottom_for, btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
@@ -744,47 +745,63 @@ async def cb_progress_want(cb: CallbackQuery, db: Database):
 
 
 # ================= рассылка =================
-def broadcast_text(staff: Staff, text: str) -> str:
-    return f"📢 <b>Сообщение ({esc(staff.signature)})</b>\n\n{esc(text)}"
-
-
+# Сообщение копируется целиком (broadcast.py): форматирование, картинки, файлы и альбомы сохраняются.
 @router.callback_query(F.data == "ab")
 async def cb_broadcast(cb: CallbackQuery, state: FSMContext, db: Database):
     if not await need_staff(cb, db):
         return
     await state.set_state(AdminForm.broadcast)
+    await state.update_data(draft=None, group=None, album=[])
     await show(
-        cb, f"📢 <b>Рассылка всей группе</b> ({len(await db.member_chats())} чел. в боте)\n\nНапиши текст сообщения. "
-        "Перед отправкой я покажу, как оно будет выглядеть.",
+        cb, f"📢 <b>Рассылка всей группе</b> ({len(await db.member_chats())} чел. в боте)\n\nПришли сообщение так, как его "
+        "должны увидеть все: с форматированием (жирный, курсив, подчёркнутый, зачёркнутый, моноширинный, спойлер, ссылки, "
+        "цитаты), с картинкой, видео, файлом или альбомом. Перед отправкой я покажу, как оно будет выглядеть.",
         kb([btn("⬅️ Отмена", "adm")]),
     )
 
 
-@router.message(AdminForm.broadcast, F.text, ~F.text.startswith("/"))
+async def preview_broadcast(msg: Message, state: FSMContext, staff: Staff, draft: broadcast.Draft) -> None:
+    await state.update_data(draft=draft.as_dict())
+    await msg.answer("Так сообщение увидят все 👇")
+    await broadcast.deliver(msg.bot, msg.chat.id, staff.signature, draft)
+    await msg.answer(
+        "Отправить всей группе?",
+        reply_markup=kb([btn("📢 Отправить", "abok")], [btn("✏️ Прислать другое", "ab"), btn("⬅️ Отмена", "adm")]),
+    )
+
+
+@router.message(AdminForm.broadcast, ~F.text.startswith("/"))
 async def admin_broadcast_text(msg: Message, state: FSMContext, db: Database):
     if not (staff := await need_staff(msg, db)):
         await state.clear()
         return
-    text = msg.text.strip()[:3000]
-    await state.update_data(text=text)
-    await msg.answer(
-        f"Так сообщение увидят все:\n\n{broadcast_text(staff, text)}",
-        reply_markup=kb([btn("📢 Отправить", "abok")], [btn("✏️ Написать заново", "ab"), btn("⬅️ Отмена", "adm")]),
-    )
+    if msg.media_group_id is None:
+        await preview_broadcast(msg, state, staff, broadcast.from_message(msg))
+        return
+    # Альбом приходит несколькими сообщениями подряд: собираем части, предпросмотр — один раз, после паузы.
+    data = await state.get_data()
+    parts = (data.get("album") or []) if data.get("group") == msg.media_group_id else []
+    await state.update_data(group=msg.media_group_id, album=[*parts, msg.message_id], caption=data.get("caption") or msg.caption)
+    if parts:
+        return
+    await asyncio.sleep(broadcast.ALBUM_WAIT)
+    data = await state.get_data()
+    await preview_broadcast(msg, state, staff, broadcast.album(msg.chat.id, data["album"][:broadcast.MAX_PHOTOS], data.get("caption") or ""))
 
 
 @router.callback_query(AdminForm.broadcast, F.data == "abok")
 async def cb_broadcast_send(cb: CallbackQuery, state: FSMContext, db: Database):
     staff = await need_staff(cb, db)
-    text = (await state.get_data()).get("text")
-    if not staff or not text:
-        await cb.answer("Сначала напиши текст", show_alert=True)
+    data = (await state.get_data()).get("draft")
+    if not staff or not data:
+        await cb.answer("Сначала пришли сообщение", show_alert=True)
         return
     await state.clear()
     await cb.answer("Отправляю…")
+    draft = broadcast.Draft(**data)
     chat_ids = await db.member_chats()
-    sent = await send_many(cb.bot, chat_ids, broadcast_text(staff, text))
-    await journal_add(db, staff, f"рассылка (дошла {sent} из {len(chat_ids)}): {text[:80]}")
+    sent = await broadcast.deliver_all(cb.bot, chat_ids, staff.signature, draft)
+    await journal_add(db, staff, f"рассылка (дошла {sent} из {len(chat_ids)}): {broadcast.describe(draft)}")
     await show(cb, f"📢 Отправлено: {sent} из {len(chat_ids)}.", kb([ADMIN_BTN]), ack=False)
 
 
@@ -1198,7 +1215,8 @@ async def send_web_link(target: Message | CallbackQuery, db: Database) -> None:
     chat_id = target.from_user.id
     role = web_role(chat_id, await db.student_by_chat(chat_id))
     if not web_allowed(role):
-        text = "Веб-панель выключена" if not config.WEB_PORT else "Веб-панель пока доступна только админам"
+        text = ("Веб-панель выключена" if not config.WEB_PORT else
+                "Сначала выбери себя из списка группы: /start" if role is None else "Веб-панель для твоей роли пока закрыта")
         if isinstance(target, CallbackQuery):
             await target.answer(text, show_alert=True)
         else:
