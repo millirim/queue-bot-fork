@@ -20,13 +20,14 @@ from aiogram.types import (
 import broadcast
 import config
 from common import (
-    MENU_BTN, bottom_for, btn, check_name, esc, is_admin, is_creator, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
+    MENU_BTN, bottom_for, btn, check_name, esc, feature_allowed, is_admin, is_creator, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed,
     web_role, works, POLL_MAX_OPTIONS, POLL_OPTION_LEN, poll_markup, poll_text,
 )
 import logsink
 import updater
 from db import ROLES, AuditRecord, Database, MinusRequest, Poll, Request, ServerLog, Student, parse_roster
+from features import FEATURES, ROLE_TITLES
 from ranking import WANT
 
 log = logging.getLogger(__name__)
@@ -102,7 +103,9 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
     ]
     if staff.admin:
         rows.append([btn("📚 Предметы", "as"), btn("💾 Копия базы", "abk")])
-        rows.append([btn("🗳 Голосования", "av"), btn("🔁 Обмены", "ax")])
+        polls_on = await feature_allowed(db, "polls", staff.chat_id, await db.student_by_chat(staff.chat_id))
+        rows.append(([btn("🗳 Голосования", "av")] if polls_on else []) + [btn("🔁 Обмены", "ax")])
+        rows.append([btn("⚙️ Функции", "fx")])
         rows.append([btn("🔄 Обновить бота", "abu")])
     if web_allowed("admin" if staff.admin else "starosta"):
         rows.append([btn("🌐 Веб-панель", "aw")])
@@ -806,6 +809,40 @@ async def cb_broadcast_send(cb: CallbackQuery, state: FSMContext, db: Database):
     await show(cb, f"📢 Отправлено: {sent} из {len(chat_ids)}.", kb([ADMIN_BTN]), ack=False)
 
 
+# ================= видимость функций (только админ) =================
+@router.callback_query(F.data == "fx")
+async def cb_features(cb: CallbackQuery, state: FSMContext, db: Database):
+    await state.clear()
+    if await need_staff(cb, db, admin_only=True):
+        await show_features(cb, db)
+
+
+async def show_features(cb: CallbackQuery, db: Database):
+    flags = {(f, r): await db.feature_on(f, r) for f in FEATURES for r in ROLES}
+    text = ("⚙️ <b>Функции</b>\n\nКому из ролей видны дополнительные возможности (очередь отключить нельзя). "
+            "Создатель видит всё всегда.\n")
+    rows = []
+    for key, feature in FEATURES.items():
+        text += f"\n<b>{esc(feature.title)}</b>\n<i>{esc(feature.hint)}</i>\n"
+        rows.append([btn(f"{feature.title.split()[0]} {ROLE_TITLES[r]} {'✅' if flags[(key, r)] else '⛔'}", f"fx:{key}:{r}") for r in ROLES])
+    await show(cb, text, kb(*rows, [ADMIN_BTN]))
+
+
+@router.callback_query(F.data.regexp(r"^fx:\w+:\w+$"))
+async def cb_feature_toggle(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db, admin_only=True)):
+        return
+    _, key, role = cb.data.split(":")
+    if key not in FEATURES or role not in ROLES:
+        await cb.answer("Такой функции нет", show_alert=True)
+        return
+    enabled = not await db.feature_on(key, role)
+    await db.set_feature(key, role, enabled)
+    await journal_add(db, staff, f"функция «{FEATURES[key].title}» для роли {ROLE_TITLES[role].lower()}: {'включена' if enabled else 'выключена'}")
+    await cb.answer("Включено" if enabled else "Выключено")
+    await show_features(cb, db)
+
+
 # ================= обмены местами (только админ) =================
 @router.callback_query(F.data == "ax")
 async def cb_swaps(cb: CallbackQuery, state: FSMContext, db: Database):
@@ -844,6 +881,19 @@ async def cb_swap_break(cb: CallbackQuery, db: Database):
 
 
 # ================= голосования (только админ) =================
+async def need_polls(target: Message | CallbackQuery, db: Database) -> Staff | None:
+    """Админ, которому включены голосования (раздел «Функции»)."""
+    if not (staff := await need_staff(target, db, admin_only=True)):
+        return None
+    if not await feature_allowed(db, "polls", target.from_user.id, await db.student_by_chat(target.from_user.id)):
+        if isinstance(target, CallbackQuery):
+            await target.answer("Голосования для админов выключены в настройках функций", show_alert=True)
+        else:
+            await target.answer("Голосования для админов выключены в настройках функций")
+        return None
+    return staff
+
+
 def poll_title(poll: Poll, voted: int | None = None, members: int | None = None) -> str:
     done = f" · {voted}/{members}" if voted is not None else ""
     return f"{'🔒' if poll.closed else '🟢'} {poll.question[:32]}{done}"
@@ -861,7 +911,7 @@ def clean_poll_options(lines: list[str]) -> list[str] | None:
 async def publish_poll(bot: Bot, db: Database, staff: Staff, question: str, options: list[str], suffix: str = "") -> tuple[Poll, int, int]:
     """Создаёт голосование и рассылает всей группе в боте. Возвращает (голосование, дошло, всего)."""
     poll = await db.get_poll(await db.create_poll(question, options, staff.signature))
-    chat_ids = await db.member_chats()
+    chat_ids = await db.feature_chats("polls")
     sent = await send_many(bot, chat_ids, poll_text(poll, None, len(chat_ids)), poll_markup(poll))
     await journal_add(db, staff, f"голосование #{poll.id} (дошло {sent} из {len(chat_ids)}): {poll.question[:80]}{suffix}")
     return poll, sent, len(chat_ids)
@@ -869,8 +919,9 @@ async def publish_poll(bot: Bot, db: Database, staff: Staff, question: str, opti
 
 async def remind_poll(bot: Bot, db: Database, staff: Staff, poll: Poll, suffix: str = "") -> tuple[int, int]:
     """Напоминает не голосовавшим. Возвращает (дошло, кому слали)."""
-    waiting = [s.chat_id for s in await db.poll_nonvoters(poll.id)]
-    members = len(await db.member_chats())
+    allowed = set(await db.feature_chats("polls"))
+    waiting = [s.chat_id for s in await db.poll_nonvoters(poll.id) if s.chat_id in allowed]
+    members = len(await db.feature_chats("polls"))
     sent = await send_many(bot, waiting, "🔔 Ты ещё не проголосовал(а):\n\n" + poll_text(poll, None, members), poll_markup(poll))
     await journal_add(db, staff, f"напоминание о голосовании #{poll.id}: дошло {sent} из {len(waiting)}{suffix}")
     return sent, len(waiting)
@@ -883,7 +934,7 @@ async def finish_poll(bot: Bot, db: Database, staff: Staff, poll: Poll, suffix: 
     await db.close_poll(poll.id)
     poll = await db.get_poll(poll.id)
     await journal_add(db, staff, f"голосование #{poll.id} закрыто: {poll.question[:80]}{suffix}")
-    chat_ids = await db.member_chats()
+    chat_ids = await db.feature_chats("polls")
     await send_many(bot, chat_ids, poll_text(poll, await db.poll_counts(poll.id), len(chat_ids)))
     return poll
 
@@ -896,9 +947,9 @@ async def remove_poll(db: Database, staff: Staff, poll: Poll, suffix: str = "") 
 @router.callback_query(F.data == "av")
 async def cb_polls(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
-    if not await need_staff(cb, db, admin_only=True):
+    if not await need_polls(cb, db):
         return
-    members, rows = len(await db.member_chats()), []
+    members, rows = len(await db.feature_chats("polls")), []
     for poll in await db.polls():
         rows.append([btn(poll_title(poll, sum((await db.poll_counts(poll.id)).values()), members), f"av:{poll.id}")])
     await show(
@@ -910,7 +961,7 @@ async def cb_polls(cb: CallbackQuery, state: FSMContext, db: Database):
 
 @router.callback_query(F.data == "avn")
 async def cb_poll_new(cb: CallbackQuery, state: FSMContext, db: Database):
-    if not await need_staff(cb, db, admin_only=True):
+    if not await need_polls(cb, db):
         return
     await state.set_state(AdminForm.poll_question)
     await show(cb, "🗳 <b>Новое голосование</b>\n\nНапиши вопрос одним сообщением.", kb([btn("⬅️ Отмена", "av")]))
@@ -918,7 +969,7 @@ async def cb_poll_new(cb: CallbackQuery, state: FSMContext, db: Database):
 
 @router.message(AdminForm.poll_question, F.text, ~F.text.startswith("/"))
 async def admin_poll_question(msg: Message, state: FSMContext, db: Database):
-    if not await need_staff(msg, db, admin_only=True):
+    if not await need_polls(msg, db):
         await state.clear()
         return
     question = " ".join(msg.text.split())
@@ -936,7 +987,7 @@ async def admin_poll_question(msg: Message, state: FSMContext, db: Database):
 
 @router.message(AdminForm.poll_options, F.text, ~F.text.startswith("/"))
 async def admin_poll_options(msg: Message, state: FSMContext, db: Database):
-    if not await need_staff(msg, db, admin_only=True):
+    if not await need_polls(msg, db):
         await state.clear()
         return
     options = clean_poll_options(msg.text.splitlines())
@@ -947,7 +998,7 @@ async def admin_poll_options(msg: Message, state: FSMContext, db: Database):
     question = (await state.get_data())["question"]
     preview = Poll(0, question, "", "", False, list(enumerate(options)))
     await msg.answer(
-        f"Так увидит группа ({len(await db.member_chats())} чел. в боте):\n\n{poll_text(preview, None, 0)}\n\n"
+        f"Так увидит группа ({len(await db.feature_chats('polls'))} чел. в боте):\n\n{poll_text(preview, None, 0)}\n\n"
         + "\n".join(f"▫️ {esc(o)}" for o in options),
         reply_markup=kb([btn("🗳 Отправить", "avs")], [btn("✏️ Заново", "avn"), btn("⬅️ Отмена", "av")]),
     )
@@ -955,7 +1006,7 @@ async def admin_poll_options(msg: Message, state: FSMContext, db: Database):
 
 @router.callback_query(AdminForm.poll_options, F.data == "avs")
 async def cb_poll_send(cb: CallbackQuery, state: FSMContext, db: Database):
-    staff = await need_staff(cb, db, admin_only=True)
+    staff = await need_polls(cb, db)
     data = await state.get_data()
     if not staff or not data.get("options"):
         await cb.answer("Сначала напиши вопрос и варианты", show_alert=True)
@@ -967,9 +1018,10 @@ async def cb_poll_send(cb: CallbackQuery, state: FSMContext, db: Database):
 
 
 async def show_poll_card(cb: CallbackQuery, db: Database, poll: Poll, ack: bool = True):
-    members = len(await db.member_chats())
+    members = len(await db.feature_chats("polls"))
     text = poll_text(poll, await db.poll_counts(poll.id), members)
-    waiting = await db.poll_nonvoters(poll.id)
+    allowed = set(await db.feature_chats("polls"))
+    waiting = [x for x in await db.poll_nonvoters(poll.id) if x.chat_id in allowed]
     if waiting:
         names = ", ".join(esc(short_name(s.name)) for s in waiting[:30])
         text += f"\n\n<b>Ещё не проголосовали ({len(waiting)}):</b> {names}{' …' if len(waiting) > 30 else ''}"
@@ -991,13 +1043,13 @@ async def load_poll(cb: CallbackQuery, db: Database, poll_id: int) -> Poll | Non
 
 @router.callback_query(F.data.regexp(r"^av:\d+$"))
 async def cb_poll_card(cb: CallbackQuery, db: Database):
-    if await need_staff(cb, db, admin_only=True) and (poll := await load_poll(cb, db, int(cb.data[3:]))):
+    if await need_polls(cb, db) and (poll := await load_poll(cb, db, int(cb.data[3:]))):
         await show_poll_card(cb, db, poll)
 
 
 @router.callback_query(F.data.regexp(r"^avr:\d+$"))
 async def cb_poll_remind(cb: CallbackQuery, db: Database):
-    if not (staff := await need_staff(cb, db, admin_only=True)) or not (poll := await load_poll(cb, db, int(cb.data[4:]))):
+    if not (staff := await need_polls(cb, db)) or not (poll := await load_poll(cb, db, int(cb.data[4:]))):
         return
     if poll.closed:
         await cb.answer("Голосование закрыто", show_alert=True)
@@ -1008,7 +1060,7 @@ async def cb_poll_remind(cb: CallbackQuery, db: Database):
 
 @router.callback_query(F.data.regexp(r"^(avx|avd):\d+$"))
 async def cb_poll_ask(cb: CallbackQuery, db: Database):
-    if not await need_staff(cb, db, admin_only=True):
+    if not await need_polls(cb, db):
         return
     action, poll_id = cb.data.split(":")
     if not (poll := await load_poll(cb, db, int(poll_id))):
@@ -1025,7 +1077,7 @@ async def cb_poll_ask(cb: CallbackQuery, db: Database):
 
 @router.callback_query(F.data.regexp(r"^(avxok|avdok):\d+$"))
 async def cb_poll_do(cb: CallbackQuery, db: Database):
-    if not (staff := await need_staff(cb, db, admin_only=True)):
+    if not (staff := await need_polls(cb, db)):
         return
     action, poll_id = cb.data.split(":")
     if not (poll := await load_poll(cb, db, int(poll_id))):

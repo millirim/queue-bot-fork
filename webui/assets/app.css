@@ -619,3 +619,33 @@ ol.rules { margin: 0; padding: 0; counter-reset: rule; display: grid; }
 
 /* Мини-приложение Telegram: отступы под вырезы и жестовую полосу телефона */
 html.tg .status { padding-bottom: env(safe-area-inset-bottom); height: calc(var(--statusbar) + env(safe-area-inset-bottom)); }
+
+/* Шрифт для ника создателя: Exo 2 (SIL OFL 1.1), лежит рядом, подключается только для него */
+@font-face { font-family: "Exo 2"; font-weight: 500; font-style: normal; font-display: swap;
+  src: url("/assets/fonts/exo-2-cyrillic-500-normal.woff2") format("woff2"); unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+@font-face { font-family: "Exo 2"; font-weight: 500; font-style: normal; font-display: swap;
+  src: url("/assets/fonts/exo-2-latin-500-normal.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215; }
+@font-face { font-family: "Exo 2"; font-weight: 600; font-style: normal; font-display: swap;
+  src: url("/assets/fonts/exo-2-cyrillic-600-normal.woff2") format("woff2"); unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+@font-face { font-family: "Exo 2"; font-weight: 600; font-style: normal; font-display: swap;
+  src: url("/assets/fonts/exo-2-latin-600-normal.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215; }
+
+/* Цветные ники по роли. Цвета подобраны под контраст не ниже 4.5:1 на каждой теме. */
+:root { --nick-starosta: #0b7a46; --nick-admin: #4b3fd1; --nick-glow: rgba(106, 107, 255, .28); }
+:root[data-theme="dark"], :root[data-theme="amoled"] { --nick-starosta: #52d19a; --nick-admin: #a99cff; --nick-glow: rgba(140, 130, 255, .35); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]):not([data-theme="amoled"]) { --nick-starosta: #52d19a; --nick-admin: #a99cff; --nick-glow: rgba(140, 130, 255, .35); }
+}
+.nick-starosta { color: var(--nick-starosta); font-weight: 600; }
+.nick-admin { color: var(--nick-admin); font-weight: 600; }
+.nick-creator {
+  display: inline-block; font-family: "Exo 2", system-ui, sans-serif; font-weight: 600; letter-spacing: .015em;
+  padding: 1px 10px; border: 1.5px solid transparent; border-radius: 10px; color: var(--text);
+  background: linear-gradient(var(--surface), var(--surface)) padding-box,
+              linear-gradient(120deg, #ff8a3d, #e5489a, #6a6bff, #1fc7d8, #ff8a3d) border-box;
+  background-size: 100% 100%, 300% 100%; box-shadow: 0 0 14px var(--nick-glow);
+  animation: nick-flow 9s linear infinite;
+}
+@keyframes nick-flow { to { background-position: 0 0, 300% 0; } }
+@media (prefers-reduced-motion: reduce) { .nick-creator { animation: none; } }
+.nick-creator { white-space: nowrap; }

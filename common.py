@@ -74,6 +74,14 @@ def panel_name(kind: str | None) -> str:
     return "Панель Админа" if kind == "admin" else "Панель старосты"
 
 
+async def feature_allowed(db: Database, feature: str, chat_id: int, student: Student | None) -> bool:
+    """Включена ли дополнительная функция (features.py) для этого человека. Создатель — всегда."""
+    if is_creator(chat_id):
+        return True
+    role = "admin" if is_admin(chat_id, student) else "starosta" if student and student.starosta else "user"
+    return await db.feature_on(feature, role)
+
+
 def staff_kind(chat_id: int, student: Student | None) -> str | None:
     """'admin', 'moderator' (староста) или None (студент)."""
     if is_admin(chat_id, student):

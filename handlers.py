@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 import config
 from admin import close_notices, notify_minus, notify_reviewers
 from common import (
-    MENU_BTN, bottom_for, btn, esc, poll_markup, poll_text, is_creator, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view, short_name,
+    MENU_BTN, bottom_for, btn, esc, feature_allowed, poll_markup, poll_text, is_creator, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view, short_name,
     show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed, web_role,
 )
 from db import Database, Student
@@ -207,7 +207,7 @@ async def show_queue(target: Message | CallbackQuery, db: Database, student: Stu
             buttons.append(row)
     swap_note = ""
     if me:
-        swap_note, swap_buttons = await swap_block(db, subject, student, me)
+        swap_note, swap_buttons = await swap_block(db, subject, student, me, await feature_allowed(db, "swap", student.chat_id, student))
         buttons += swap_buttons
     view = subgroup_view(target.from_user.id)
     if filters := subgroup_buttons(rows, view, f"sf:{subject.id}"):
@@ -371,7 +371,7 @@ async def cb_my(cb: CallbackQuery, state: FSMContext, db: Database):
 
 
 # ================= обмен местами =================
-async def swap_block(db: Database, subject, student: Student, me) -> tuple[str, list]:
+async def swap_block(db: Database, subject, student: Student, me, allowed: bool = True) -> tuple[str, list]:
     """Строка про обмен под очередью и кнопки: «Поменяться» / «Отменить обмен»."""
     if active := await db.active_swaps(subject.id, student.id):
         other = await db.get_student(active[0].partner(student.id))
@@ -383,7 +383,7 @@ async def swap_block(db: Database, subject, student: Student, me) -> tuple[str, 
         other = await db.get_student(pending[0].to_id)
         return (f"\n\n⏳ Ждём ответа от {esc(short_name(other.name))} на предложение обмена.",
                 [[btn("↩️ Отозвать предложение", f"sxc:{pending[0].id}")]])
-    if me.done < subject.total:
+    if allowed and me.done < subject.total:
         return "", [[btn("🔁 Поменяться местами", f"sx:{subject.id}")]]
     return "", []
 
@@ -395,6 +395,9 @@ async def places(db: Database, subject_id: int, *student_ids: int) -> dict[int, 
 @router.callback_query(F.data.regexp(r"^sx:\d+$"))
 async def cb_swap_pick(cb: CallbackQuery, db: Database):
     if not (student := await require_student(cb, db)):
+        return
+    if not await feature_allowed(db, "swap", cb.from_user.id, student):
+        await cb.answer("Обмены местами для тебя выключены", show_alert=True)
         return
     subject = await db.get_subject(int(cb.data[3:]))
     if subject is None:
@@ -420,6 +423,9 @@ async def cb_swap_pick(cb: CallbackQuery, db: Database):
 @router.callback_query(F.data.regexp(r"^sxp:\d+:\d+$"))
 async def cb_swap_propose(cb: CallbackQuery, db: Database):
     if not (student := await require_student(cb, db)):
+        return
+    if not await feature_allowed(db, "swap", cb.from_user.id, student):
+        await cb.answer("Обмены местами для тебя выключены", show_alert=True)
         return
     _, subject_id, target_id = cb.data.split(":")
     subject, target = await db.get_subject(int(subject_id)), await db.get_student(int(target_id))
@@ -449,6 +455,9 @@ async def cb_swap_propose(cb: CallbackQuery, db: Database):
 @router.callback_query(F.data.regexp(r"^sxy:\d+$"))
 async def cb_swap_accept(cb: CallbackQuery, db: Database):
     if not (student := await require_student(cb, db)):
+        return
+    if not await feature_allowed(db, "swap", cb.from_user.id, student):
+        await cb.answer("Обмены местами для тебя выключены", show_alert=True)
         return
     result = await db.accept_swap(int(cb.data[4:]), student.id)
     if isinstance(result, str):
@@ -506,12 +515,15 @@ async def cb_poll_vote(cb: CallbackQuery, db: Database):
     if student is None:
         await cb.answer("Голосуют только участники группы в боте", show_alert=True)
         return
+    if not await feature_allowed(db, "polls", cb.from_user.id, student):
+        await cb.answer("Голосования для тебя выключены", show_alert=True)
+        return
     result = await db.vote(int(poll_id), student.id, int(option_id))
     poll = await db.get_poll(int(poll_id))
     if poll is None:
         await cb.answer("Такого голосования больше нет", show_alert=True)
         return
-    members = len(await db.member_chats())
+    members = len(await db.feature_chats("polls"))
     if result == "closed":
         await cb.answer("Голосование закрыто", show_alert=True)
     elif result == "same":

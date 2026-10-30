@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import aiosqlite
 
 import config
+from features import FEATURES, ROLES as ROLES_FOR_FEATURES
 from ranking import Row, apply_swaps, draw_lot, order
 
 log = logging.getLogger(__name__)
@@ -137,6 +138,14 @@ CREATE TABLE IF NOT EXISTS swaps (
     created_at TEXT NOT NULL,               -- ISO, местное время
     ended_at   TEXT,                        -- когда закончился или отменён
     ended_by   INTEGER                      -- кто сдал и этим закончил обмен (для отмены «Сдал» в течение минуты)
+);
+
+-- Видимость дополнительных функций по ролям (features.py). Нет строки — значение по умолчанию из реестра.
+CREATE TABLE IF NOT EXISTS feature_flags (
+    feature TEXT NOT NULL,                  -- ключ из features.FEATURES
+    role    TEXT NOT NULL,                  -- user, starosta или admin
+    enabled INTEGER NOT NULL,               -- 1 — включено, 0 — выключено
+    PRIMARY KEY (feature, role)
 );
 
 -- Голосования: вопрос с вариантами; один голос на человека, пока голосование открыто его можно поменять.
@@ -516,6 +525,33 @@ class Database:
     async def member_chats(self) -> list[int]:
         """Telegram всех из группы, кто есть в боте."""
         return [s.chat_id for s in await self.students() if s.linked]
+
+    # --- видимость функций ---
+    async def feature_flags(self) -> dict[tuple[str, str], bool]:
+        rows = await self._all("SELECT feature, role, enabled FROM feature_flags")
+        return {(r["feature"], r["role"]): bool(r["enabled"]) for r in rows}
+
+    async def feature_on(self, feature: str, role: str) -> bool:
+        """Включена ли функция для роли ('user', 'starosta', 'admin'); создателя проверяет вызывающий."""
+        row = await self._one("SELECT enabled FROM feature_flags WHERE feature = ? AND role = ?", (feature, role))
+        return bool(row["enabled"]) if row else FEATURES[feature].default
+
+    async def set_feature(self, feature: str, role: str, enabled: bool) -> None:
+        assert feature in FEATURES and role in ROLES_FOR_FEATURES
+        await self._write(
+            "INSERT INTO feature_flags (feature, role, enabled) VALUES (?, ?, ?) "
+            "ON CONFLICT(feature, role) DO UPDATE SET enabled = excluded.enabled", (feature, role, int(enabled)))
+
+    async def feature_chats(self, feature: str) -> list[int]:
+        """Telegram тех, кому функция включена (для рассылок): по роли человека; создатели — всегда."""
+        chats = []
+        for s in await self.students():
+            if not s.linked:
+                continue
+            role = "admin" if s.admin else "starosta" if s.starosta else "user"
+            if s.chat_id in config.CREATOR_IDS or await self.feature_on(feature, role):
+                chats.append(s.chat_id)
+        return chats
 
     # --- обмен местами ---
     def _swap(self, row) -> Swap:

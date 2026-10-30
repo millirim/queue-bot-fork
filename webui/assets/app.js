@@ -147,6 +147,12 @@ function fmtBytes(n) {
 const ROLE = { admin: "Админ", starosta: "Староста", user: "Студент" };
 const ROLE_PILL = { admin: "brand", starosta: "info", user: "" };
 
+// Ник с цветом по роли: староста и админ — цветом, создатель — градиентной рамкой. who: { role, creator }.
+function nick(text, who) {
+  const kind = !who ? "" : who.creator ? "creator" : who.role === "admin" ? "admin" : who.role === "starosta" && who.linked !== false ? "starosta" : "";
+  return h("span", { class: kind ? `nick nick-${kind}` : "", text });
+}
+
 function rolePill(s) {
   if (s.creator) return h("span", { class: "pill brand", text: "Создатель" });
   if (!s.linked && s.role !== "user") return h("span", { class: "pill", text: `${ROLE[s.role]} · после входа` });
@@ -498,8 +504,8 @@ const NAV = [
     { id: "overview", label: "Обзор", ic: "home", min: "user" },
     { id: "queues", label: "Очереди", ic: "list", min: "user" },
     { id: "my", label: "Моё", ic: "user", min: "user", student: true, badge: "swaps" },
-    { id: "polls", label: "Голосования", ic: "vote", min: "user", badge: "polls" },
-    { id: "suggestions", label: "Предложения", ic: "bulb", min: "user" },
+    { id: "polls", label: "Голосования", ic: "vote", min: "user", badge: "polls", feature: "polls" },
+    { id: "suggestions", label: "Предложения", ic: "bulb", min: "user", feature: "suggestions" },
     { id: "rules", label: "Как это работает", short: "Правила", ic: "help", min: "user" },
   ] },
   { group: "Управление", items: [
@@ -516,7 +522,8 @@ const NAV = [
 const RANK = { user: 0, starosta: 1, admin: 2 };
 const can = (role) => state.me && RANK[state.view] >= RANK[role];
 const isStudent = () => Boolean(state.me && state.me.student);
-const navItems = () => NAV.flatMap((g) => g.items.filter((it) => can(it.min) && (!it.student || isStudent())).map((it) => ({ ...it, group: g.group })));
+const featureOn = (key) => !key || !state.me || !state.me.features || state.me.features[key] !== false;
+const navItems = () => NAV.flatMap((g) => g.items.filter((it) => can(it.min) && (!it.student || isStudent()) && featureOn(it.feature)).map((it) => ({ ...it, group: g.group })));
 const allowed = (id) => navItems().some((it) => it.id === id);
 // Что на нижних вкладках телефона; остальное — в «Ещё».
 const TABS = { user: ["overview", "queues", "my", "polls"], starosta: ["overview", "queues", "requests", "people"], admin: ["overview", "queues", "requests", "people"] };
@@ -592,7 +599,7 @@ function accountMenu(anchor) {
   const out = h("button", { class: "item", type: "button" }, icon("logout"), "Выйти");
   action(out, async () => { await api("/api/logout", { method: "POST", body: {} }); closePopover(); state.me = null; history.replaceState(null, "", "/"); renderLogin(); });
   popover(anchor, [
-    h("div", { class: "who" }, h("strong", { text: me.name || `Telegram ID ${me.chat_id}` }),
+    h("div", { class: "who" }, h("strong", null, nick(me.name || `Telegram ID ${me.chat_id}`, { role: me.role, creator: me.creator })),
       h("span", { class: "faint", text: me.creator ? "Создатель" : ROLE[me.role] })),
     me.views.length > 1 ? [h("div", { class: "sep" }), h("div", { class: "label", text: "Смотреть как" }), viewSwitch()] : null,
     h("div", { class: "sep" }),
@@ -854,6 +861,7 @@ PAGES.queue = async (page, sid, token) => {
 
   const swapBlock = (s, me) => {
     const w = me.swap || {};
+    if (!featureOn("swap") && !w.state) return null;
     if (w.state === "active") {
       return h("div", { class: "swap" }, h("div", { class: "grow" }, h("strong", { text: `Обмен с ${w.with}` }),
         h("span", { class: "muted", text: w.working ? "Вы на местах друг друга, пока кто-то из вас не сдаст." : "Сейчас не действует: нужно, чтобы вы оба были с отметкой «хочу сдать» или оба без." })),
@@ -974,7 +982,7 @@ PAGES.queue = async (page, sid, token) => {
       const open = () => { state.onPersonChange = refresh; openPerson(r.id); };
       body.push(h("tr", { class: (r.me ? "me " : "") + (data.editable ? "link" : ""), onclick: data.editable ? open : null },
         h("td", { class: "place", text: i + 1 }),
-        h("td", { class: "lead" }, h("span", { class: "name", text: r.name }),
+        h("td", { class: "lead" }, h("span", { class: "name" }, nick(r.name, r)),
           r.swapped ? h("span", { class: "pill info", title: "Стоит на месте по обмену", text: "обмен" }) : null,
           r.me ? h("span", { class: "faint", text: " · это ты" }) : null),
         h("td", null, r.subgroup ? `${r.subgroup} подгр.` : h("span", { class: "faint", text: "—" })),
@@ -1246,7 +1254,7 @@ PAGES.people = async (page, pid, token) => {
     const shown = list.filter((s) => pred(s) && match(s));
     const rows = shown.map((s) => h("button", { class: "list-row", type: "button", onclick: () => { location.hash = `#/people/${s.id}`; } },
       h("div", { class: "grow" },
-        h("span", { class: "title", text: s.name }),
+        h("span", { class: "title" }, nick(s.name, s)),
         h("span", { class: "meta" }, s.username ? h("span", { class: "mono", text: `@${s.username}` }) : null,
           h("span", { text: s.subgroup ? `${s.subgroup} подгруппа` : "подгруппа не указана" }))),
       h("div", { class: "end" }, rolePill(s), ui.inactive ? h("span", { class: "pill bad", text: "убран из группы" }) : botPill(s), icon("chevron"))));
@@ -1334,7 +1342,7 @@ async function openPerson(id) {
 
   const draw = () => {
     fill(head,
-      h("div", { class: "titles" }, h("span", { class: "label", text: "Карточка" }), h("h2", { text: p.name }),
+      h("div", { class: "titles" }, h("span", { class: "label", text: "Карточка" }), h("h2", null, nick(p.name, p)),
         h("div", { class: "chips" }, p.active ? botPill(p) : h("span", { class: "pill bad", text: "убран из группы" }), rolePill(p),
           p.subgroup ? h("span", { class: "pill", text: `${p.subgroup} подгруппа` }) : null)),
       button("", { kind: "ghost icon", ic: "x", title: "Закрыть", onClick: async () => closeDrawer() }));
@@ -1788,6 +1796,22 @@ PAGES.server = async (page, _, token) => {
       await api("/api/logout", { method: "POST", body: { everywhere: true } });
       state.me = null; history.replaceState(null, "", "/"); renderLogin();
     } });
+    const flags = await api("/api/features");
+    const featuresCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", { text: "Функции по ролям" }),
+      h("span", { class: "sub", text: "Очередь отключить нельзя. Создатель видит всё всегда." })),
+      h("div", { class: "table-wrap" }, h("table", null,
+        h("thead", null, h("tr", null, h("th", { text: "Функция" }), Object.values(flags.roles).map((t) => h("th", { class: "num", text: t })))),
+        h("tbody", null, flags.features.map((f) => h("tr", null,
+          h("td", null, h("strong", { text: f.title }), h("div", { class: "faint", text: f.hint })),
+          Object.keys(flags.roles).map((role) => {
+            const box = h("input", { type: "checkbox", "aria-label": `${f.title} · ${flags.roles[role]}` });
+            box.checked = f.roles[role];
+            box.addEventListener("change", async () => {
+              try { await api("/api/features", { method: "POST", body: { feature: f.key, role, enabled: box.checked } }); toast(box.checked ? "Включено" : "Выключено"); }
+              catch (e) { box.checked = !box.checked; throw e; }
+            });
+            return h("td", { class: "num" }, box);
+          })))))));
     fill(page,
       pageHead("Сервер", { tag: "Администрирование", sub: "Состояние бота, обновление и копия базы." }),
       h("div", { class: "grid joined" },
@@ -1806,6 +1830,7 @@ PAGES.server = async (page, _, token) => {
         h("div", { class: "card nodes" }, h("div", { class: "card-head" }, h("h2", { text: "Копия базы" })),
           h("div", { class: "card-body" }, h("p", { class: "muted", text: "Полная копия одним zip-файлом (внутри queue.db). В ней все ФИО, Telegram ID и сданные — храни аккуратно и не пересылай." })),
           h("div", { class: "card-foot" }, backup))),
+      featuresCard,
       h("div", { class: "card danger-zone" }, h("div", { class: "list-row" },
         h("div", { class: "grow" }, h("span", { class: "title", text: "Сессии веб-панели" }), h("span", { class: "meta", text: "Если открывал панель на чужом компьютере — заверши все входы." })),
         logoutAll)));
