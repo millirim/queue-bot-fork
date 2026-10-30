@@ -28,6 +28,7 @@ from aiohttp import web
 
 import broadcast
 import config
+import replication
 import logsink
 from metrics import M, rid_var, who_var
 import updater
@@ -1236,6 +1237,28 @@ async def api_server(request: web.Request) -> web.Response:
     })
 
 
+async def api_replication(request: web.Request) -> web.Response:
+    """Копии базы на другие серверы: настроено ли, какие приёмники, последние результаты (токены не отдаём)."""
+    await need(request, "admin")
+    db = db_of(request)
+    return web.json_response({
+        "key_ok": replication.load_key() is not None,
+        "targets": [{"name": t.name, "url": t.url, "keep": t.keep} for t in replication.targets()],
+        "every_hours": float(os.getenv("BACKUP_EVERY_HOURS", "24") or 24),
+        "log": await db.replication_log(20),
+    })
+
+
+async def api_replication_run(request: web.Request) -> web.Response:
+    v = await need(request, "admin")
+    db = db_of(request)
+    if not replication.targets():
+        raise Fail("Приёмники не настроены: BACKUP_TARGETS в настройках сервера", 409)
+    results = await replication.replicate_once(db)
+    await journal(db, v, "копия базы отправлена на другие серверы: " + ", ".join(f"{r.target} — {'ок' if r.ok else 'ошибка'}" for r in results))
+    return web.json_response({"results": [{"target": r.target, "ok": r.ok, "size": r.size, "detail": r.detail} for r in results]})
+
+
 async def api_update(request: web.Request) -> web.Response:
     v = await need(request, "admin")
     if not updater.available() or not updater.request(v.chat_id):
@@ -1306,6 +1329,8 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_post("/api/logout", api_logout)
     r.add_get("/api/me", api_me)
     r.add_get("/api/overview", api_overview)
+    r.add_get("/api/replication", api_replication)
+    r.add_post("/api/replication/run", api_replication_run)
     r.add_get("/api/metrics", api_metrics)
     r.add_get("/api/live", api_live)
     r.add_post("/api/presence", api_presence)

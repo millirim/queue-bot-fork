@@ -144,6 +144,16 @@ CREATE TABLE IF NOT EXISTS swaps (
     ended_by   INTEGER                      -- кто сдал и этим закончил обмен (для отмены «Сдал» в течение минуты)
 );
 
+-- Копии базы на другие серверы (replication.py): что и когда отправили, получилось ли.
+CREATE TABLE IF NOT EXISTS replication_log (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    at     TEXT NOT NULL,                   -- ISO, местное время
+    target TEXT NOT NULL,                   -- имя приёмника из BACKUP_TARGETS
+    ok     INTEGER NOT NULL,                -- 1 — доставлено и сумма сошлась
+    size   INTEGER NOT NULL,                -- размер зашифрованной копии, байт
+    detail TEXT NOT NULL                    -- что случилось, по-русски
+);
+
 -- Нагрузка по минутам (metrics.py): хранится неделю, по ней график за час на странице «Live».
 CREATE TABLE IF NOT EXISTS metrics_minute (
     minute     TEXT PRIMARY KEY,            -- ISO до минуты, местное время
@@ -1181,6 +1191,21 @@ class Database:
             "(SELECT COUNT(*) FROM suggestions WHERE status = 'new') AS suggestions"
         )
         return dict(row)
+
+    # --- копии на другие серверы ---
+    async def add_replication(self, target: str, ok: bool, size: int, detail: str) -> None:
+        await self._write("INSERT INTO replication_log (at, target, ok, size, detail) VALUES (?, ?, ?, ?, ?)",
+                          (local_now().isoformat(timespec="seconds"), target, int(ok), size, detail))
+        await self._write("DELETE FROM replication_log WHERE id <= (SELECT MAX(id) FROM replication_log) - 200")
+
+    async def replication_log(self, limit: int = 20) -> list[dict]:
+        rows = await self._all("SELECT * FROM replication_log ORDER BY id DESC LIMIT ?", (limit,))
+        return [{**dict(r), "ok": bool(r["ok"])} for r in rows]
+
+    async def last_replication_time(self) -> float | None:
+        """Когда последний раз успешно отправили (unix-время) — по нему фоновая задача решает, пора ли снова."""
+        row = await self._one("SELECT at FROM replication_log WHERE ok = 1 ORDER BY id DESC LIMIT 1")
+        return datetime.fromisoformat(row["at"]).replace(tzinfo=config.TIMEZONE).timestamp() if row else None
 
     # --- нагрузка по минутам ---
     METRICS_KEEP_DAYS = 7

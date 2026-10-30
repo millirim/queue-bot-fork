@@ -1,0 +1,19 @@
+# Пример службы приёмника копий на другом сервере. Скопируй receiver/queue-bot-receiver.py в /opt/queue-bot-receiver/,
+# положи токен в /etc/queue-bot-receiver.env (RECEIVER_TOKEN=...) и включи: systemctl enable --now queue-bot-receiver
+[Unit]
+Description=Приёмник копий базы queue-bot
+After=network-online.target
+
+[Service]
+User=nobody
+EnvironmentFile=/etc/queue-bot-receiver.env
+ExecStart=/usr/bin/python3 -I /opt/queue-bot-receiver/queue-bot-receiver.py serve --dir /var/lib/queue-bot-backups --host 127.0.0.1 --port 8765 --keep 14
+StateDirectory=queue-bot-backups
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
