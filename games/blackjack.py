@@ -13,6 +13,7 @@
 5. Расчёт, пауза 6 с, новый круг ставок.
 
 Действия: {"a":"bet","amount":N}, {"a":"hit"}, {"a":"stand"}, {"a":"double"}, {"a":"split"}, {"a":"insurance","amount":N} (0 — отказ),
+{"a":"start"} (только хозяин стола, пока игра не началась: то же, что start()),
 {"a":"end"} (только хозяин стола: закончить игру после текущего раунда, а в паузе и в ставках — сразу).
 
 Выплаты (в целых фишках) и правила
@@ -46,7 +47,7 @@ from games.base import Game, GameError
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
 VALUE = {**{r: i + 2 for i, r in enumerate("23456789")}, "T": 10, "J": 10, "Q": 10, "K": 10, "A": 11}
-SUIT_SYMBOL = {"s": "♠︎", "h": "♥︎", "d": "♦︎", "c": "♣︎"}
+SUIT_SYMBOL = {"s": "♠\ufe0e", "h": "♥\ufe0e", "d": "♦\ufe0e", "c": "♣\ufe0e"}
 MAX_SEATS = 6
 MAX_HANDS = 4              # исходная рука + 3 сплита
 MAX_LOG = 60
@@ -463,6 +464,8 @@ class BlackjackGame(Game):
                 acts.append("double")
                 if h.cards[0][0] == h.cards[1][0] and len(s.hands) < MAX_HANDS:
                     acts.append("split")
+        if seat == self.host() and self.phase == "lobby":
+            acts.append("start")
         if seat == self.host() and self.phase not in ("finished",) and not self._ending:
             acts.append("end")
         return out
@@ -476,6 +479,10 @@ class BlackjackGame(Game):
         s = self.seats[seat]
         if a == "end":
             self._end_by_host(seat)
+        elif a == "start":
+            if seat != self.host():
+                raise GameError("Начать игру может только хозяин стола")
+            self.start()
         elif a == "bet":
             self._bet(seat, s, action.get("amount"))
         elif a == "insurance":

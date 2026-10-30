@@ -1305,3 +1305,20 @@ def test_act_is_fast_at_showdown_with_six_players():
         act(g, g.cur, "allin" if "allin" in lg["actions"] else "call")
         worst = max(worst, time.perf_counter() - t0)
     assert worst * 1000 < Game.ACT_BUDGET_MS
+
+
+def test_host_can_start_the_game_from_the_screen():
+    g = PokerGame({}, random.Random(3))
+    g.add_player(1, "Аня", 1000)
+    assert g.view(0)["actions"] == []                        # одному начинать рано
+    g.add_player(2, "Боря", 1000)
+    assert g.view(0)["actions"] == ["start"] and g.view(1)["actions"] == [] and g.view(None)["actions"] == []
+    before = snapshot(g)
+    for seat, action in ((1, {"a": "start"}), (None, {"a": "start"})):
+        with pytest.raises(GameError):
+            g.act(seat, action)
+        assert snapshot(g) == before
+    g.act(0, {"a": "start"})
+    assert g.phase == "preflop" and g.hand_no == 1
+    with pytest.raises(GameError):
+        g.act(0, {"a": "start"})

@@ -1076,4 +1076,19 @@ def test_score_helper_and_card_text():
     assert score(["As", "Ad", "9c"]) == (21, True)
     assert score(["As", "6d", "Tc"]) == (17, False)
     assert score(["Ks", "Qd", "5c"]) == (25, False)
-    assert card_text("Ts") == "10♠︎" and card_text("Ah") == "A♥︎"
+    assert card_text("Ts") == "10♠\ufe0e" and card_text("Ah") == "A♥\ufe0e"
+
+
+def test_host_can_start_the_game_from_the_screen():
+    g = make(2)
+    assert g.legal(0)["actions"] == ["start", "end"] and g.legal(1)["actions"] == []
+    assert g.view(0)["actions"] == ["start", "end"]
+    before = snapshot(g)
+    with pytest.raises(GameError):
+        g.act(1, {"a": "start"})                        # не хозяин
+    assert snapshot(g) == before
+    g.act(0, {"a": "start"})
+    assert g.phase == "betting"
+    with pytest.raises(GameError):
+        g.act(0, {"a": "start"})                        # уже началась
+    assert "start" not in g.legal(0)["actions"]

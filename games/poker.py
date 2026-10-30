@@ -4,7 +4,7 @@
 
 Как устроена раздача
 - Кнопка дилера крутится по кругу. В игре вдвоём дилер = малый блайнд и ходит первым до флопа, после флопа первым ходит второй игрок.
-- Действия: {"a":"fold"}, {"a":"check"}, {"a":"call"}, {"a":"raise","amount":N}, {"a":"allin"}.
+- Действия: {"a":"fold"}, {"a":"check"}, {"a":"call"}, {"a":"raise","amount":N}, {"a":"allin"}, а в лобби у хозяина стола ещё {"a":"start"}.
   amount — ИТОГОВАЯ ставка игрока в этом круге торгов («рейз до N»); {"a":"raise","amount":"allin"} — то же, что allin.
 - Минимальный рейз: итоговая ставка не меньше «текущая ставка + последний полный рейз» (на префлопе первый рейз — не меньше большого блайнда).
   Олл-ин на меньшую сумму разрешён всегда.
@@ -550,6 +550,11 @@ class PokerGame(Game):
     def act(self, seat: int, action: dict[str, Any]) -> None:
         if not isinstance(action, dict):
             raise GameError("Непонятное действие")
+        if action.get("a") == "start" and self.phase == "lobby":
+            if seat != self.host():
+                raise GameError("Начать игру может только хозяин стола")
+            self.start()
+            return
         if self.phase not in STREETS or self.cur is None:
             raise GameError("Сейчас торги не идут")
         if isinstance(seat, bool) or not isinstance(seat, int) or seat != self.cur:
@@ -832,7 +837,8 @@ class PokerGame(Game):
             "board": list(self.board), "pot": self.pot_total() if self.phase in STREETS else 0,
             "pots": self.pots_view() if self.phase in STREETS else [], "current_bet": self.current_bet if self.phase in STREETS else 0,
             "to_call": legal["to_call"], "min_raise_to": legal["min_raise_to"], "max_raise_to": legal["max_raise_to"],
-            "actions": legal["actions"], "timer": timer,
+            "actions": legal["actions"] or (["start"] if self.phase == "lobby" and me is not None and me == self.host() and self.can_start() else []),
+            "timer": timer,
             "deck_hash": self.deck_hash or None, "reveal": self.reveal, "prev_reveal": self.prev_reveal,
             "result": self.last_result, "options": dict(self.options), "can_start": self.can_start(),
             "summary": self.summary if self._finished else None,
