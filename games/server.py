@@ -115,23 +115,15 @@ async def handle(hub: Hub, conn: Conn, msg: dict) -> None:
     elif kind in ("join", "watch"):
         await hub.join(conn, str(msg.get("room", "")), msg.get("buyin") if isinstance(msg.get("buyin"), int) else None, kind == "watch")
     elif kind == "start":
-        room = conn.room
-        if room is None or room.owner_id != conn.player.id:
-            raise GameError("Начать может хозяин стола")
-        async def begin():
-            if room.state != "lobby":
-                raise GameError("Игра уже идёт")
-            if not room.game.can_start():
-                raise GameError("Пока не хватает игроков")
-            room.game.start()
-            room.state = "playing"
-        await room.guarded(conn, begin)
-        hub.dirty = True
+        await start_room(hub, conn)
     elif kind == "act":
         room = conn.room
         action = msg.get("a")
         if room is None or conn.player.id not in room.seat_of or not isinstance(action, dict):
             raise GameError("Ты не за столом")
+        if room.state == "lobby" and action.get("a") == "start":  # у покера и «21» своя кнопка «Начать игру»: это тот же старт стола
+            await start_room(hub, conn)
+            return
         if room.state != "playing":
             raise GameError("Игра ещё не началась")
         seat = room.seat_of[conn.player.id]
@@ -148,6 +140,23 @@ async def handle(hub: Hub, conn: Conn, msg: dict) -> None:
         await conn.send({"t": "pong"})
     else:
         raise GameError("Непонятное сообщение")
+
+
+async def start_room(hub: Hub, conn: Conn) -> None:
+    room = conn.room
+    if room is None or room.owner_id != conn.player.id:
+        raise GameError("Начать может хозяин стола")
+
+    async def begin():
+        if room.state != "lobby":
+            raise GameError("Игра уже идёт")
+        if not room.game.can_start():
+            raise GameError("Пока не хватает игроков")
+        room.game.start()
+        room.state = "playing"
+
+    await room.guarded(conn, begin)
+    hub.dirty = True
 
 
 async def _act(room, seat: int, action: dict) -> None:

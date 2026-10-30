@@ -172,7 +172,7 @@ def test_blackjack_round_pays_back_and_leaves_no_holds(tmp_path):
             await a.send_json({"t": "create", "kind": "blackjack", "options": {"min_bet": 10, "buyin": 500}})
             await until(a, "state")
             assert await store.balance(1) == 500
-            await a.send_json({"t": "start"})
+            await a.send_json({"t": "act", "a": {"a": "start"}})  # кнопка «Начать игру» на столе «21» — то же, что старт стола
             msg = await state_where(a, lambda m: "bet" in (m["view"].get("actions") or []) or m["view"].get("phase") == "betting")
             await a.send_json({"t": "act", "a": {"a": "bet", "amount": 10}})
             for _ in range(12):  # доигрываем раунд: на любой запрос хода отвечаем «хватит»

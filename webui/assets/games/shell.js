@@ -12,6 +12,8 @@
     poker: ["Техасский холдем на игровые фишки, 2–6 человек.", "table"],
   };
 
+  const OWN_START = new Set(["poker", "blackjack"]);  // у этих игр своя кнопка «Начать игру» на столе
+
   window.QB_GAMES = {
     register(kind, def) { registry[kind] = def; },
     page(page, param, token) { return openGames(page, param, token); },
@@ -126,7 +128,7 @@
         try { destroyGame = def.render(root, tableApi()) || (() => {}); } catch (e) { toast("Экран игры упал, но ты остался за столом", true); }
       }
       const { start, info } = body._parts;
-      start.classList.toggle("hidden", !(r.state === "lobby" && me && r.owner === me.name));
+      start.classList.toggle("hidden", !(r.state === "lobby" && me && r.owner === me.name) || OWN_START.has(r.kind));
       info.textContent = `${r.state === "lobby" ? "ждём игроков" : r.state === "playing" ? "идёт игра" : "игра закончена"} · ${r.players}/${r.max}`;
       last = { view: room.view, seat: room.seat, room: room.room };
       for (const fn of handlers) { try { fn(last); } catch (e) { /* ошибка в одной игре не должна ломать оболочку */ } }
