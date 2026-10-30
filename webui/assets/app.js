@@ -47,6 +47,7 @@ const ICONS = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
   vote: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  pulse: '<path d="M3 12h4l2.5-6 4 12 2.5-6H21"/>',
   bulb: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17h.01"/>',
   swap: '<path d="M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
@@ -182,7 +183,7 @@ class ApiError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
 
-const state = { me: null, view: null, route: null, page: null, timers: [], badges: {}, searchIndex: null };
+const state = { me: null, view: null, route: null, page: null, timers: [], cleanups: [], badges: {}, searchIndex: null };
 
 async function api(path, { method = "GET", body, raw = false } = {}) {
   const headers = { "X-View-As": state.view || "" };
@@ -522,6 +523,7 @@ const NAV = [
   ] },
   { group: "Администрирование", items: [
     { id: "subjects", label: "Предметы", ic: "book", min: "admin" },
+    { id: "live", label: "Live", ic: "pulse", min: "admin" },
     { id: "server", label: "Сервер", ic: "server", min: "admin" },
   ] },
 ];
@@ -696,6 +698,8 @@ document.addEventListener("keydown", (e) => {
 function clearTimers() {
   for (const t of state.timers) clearInterval(t);
   state.timers = [];
+  for (const f of state.cleanups || []) { try { f(); } catch (e) { /* уходим со страницы */ } }  // например, закрыть WebSocket
+  state.cleanups = [];
 }
 
 function every(ms, fn) {
@@ -1772,6 +1776,148 @@ PAGES.subjects = async (page, _, token) => {
 };
 
 // ================= сервер =================
+// ================= Live: нагрузка и события сервера в реальном времени =================
+PAGES.live = async (page, _, token) => {
+  const KINDS = { web: ["Веб", "web"], bot: ["Бот", "bot"], log: ["Лог", "log"], action: ["Действие", "action"] };
+  const FEED_MAX = 400;
+  const ui = { kinds: new Set(["web", "bot", "log", "action"]), onlyBad: false, noise: false, paused: false, rid: null };
+  let events = [], series = [], snap = null, history = [], ws = null, retry = 1000, closed = false;
+  let reconnectTimer = null;
+
+  const tile = (label, key, unit = "") => {
+    const value = h("span", { class: "value mono", text: "—" });
+    const hint = h("span", { class: "hint", text: "" });
+    return { node: h("div", { class: "stat" }, h("span", { class: "label", text: label }), value, hint),
+      set: (v, extra = "") => { value.textContent = v == null ? "—" : `${v}${unit}`; hint.textContent = extra; } };
+  };
+  const tiles = {
+    rps: tile("Запросов в секунду", "rps"), p95: tile("Ответ, 95%", "p95", " мс"), err: tile("Ошибок за минуту", "err"),
+    upd: tile("Бот · обновлений/мин", "upd"), cpu: tile("Процессор", "cpu", " %"), mem: tile("Память", "mem", " МБ"),
+    lag: tile("Задержка цикла", "lag", " мс"), who: tile("Вкладок Live", "who"),
+  };
+  const fmtSnap = (s) => {
+    tiles.rps.set(s.rps, `за минуту: ${s.req_min}`);
+    tiles.p95.set(s.p95, `медиана ${s.p50} · макс ${s.max}`);
+    tiles.err.set(s.err_min, s.err_min ? "5xx — смотри ленту" : "всё спокойно");
+    tiles.upd.set(s.upd_min);
+    tiles.cpu.set(s.cpu, `нагрузка системы ${s.load1}`);
+    tiles.mem.set(s.rss_mb, `база ${fmtBytes(s.db_bytes)}`);
+    tiles.lag.set(s.lag_ms, s.lag_ms > 100 ? "цикл событий тормозит" : "в норме");
+    tiles.who.set(s.clients, `работает ${fmtDuration(s.uptime)}`);
+  };
+
+  // --- схема «что сейчас происходит»: вспышки на узлах и линиях ---
+  const NODES = { tg: [60, 40, "Telegram"], bot: [230, 40, "Бот"], db: [400, 100, "База"], web: [230, 160, "Веб"], br: [60, 160, "Браузеры"] };
+  const EDGES = { "tg-bot": ["tg", "bot"], "bot-db": ["bot", "db"], "web-db": ["web", "db"], "br-web": ["br", "web"] };
+  const flowSvg = (() => {
+    const lines = Object.entries(EDGES).map(([id, [a, b]]) => `<line data-edge="${id}" x1="${NODES[a][0]}" y1="${NODES[a][1]}" x2="${NODES[b][0]}" y2="${NODES[b][1]}"/>`).join("");
+    const nodes = Object.entries(NODES).map(([id, [x, y, label]]) => `<g data-node="${id}"><rect x="${x - 46}" y="${y - 16}" width="92" height="32" rx="9"/><text x="${x}" y="${y + 4}" text-anchor="middle">${label}</text></g>`).join("");
+    const svg = h("div", { class: "flow", role: "img", "aria-label": "Схема: Telegram, бот, база, веб, браузеры" });
+    svg.innerHTML = `<svg viewBox="0 0 460 200" aria-hidden="true">${lines}${nodes}</svg>`;
+    return svg;
+  })();
+  const flash = (ids, bad) => {
+    for (const id of ids) {
+      const el = flowSvg.querySelector(`[data-edge="${id}"], [data-node="${id}"]`);
+      if (!el) continue;
+      el.classList.remove("hit", "hit-bad"); void el.getBoundingClientRect(); el.classList.add(bad ? "hit-bad" : "hit");
+    }
+  };
+  const route_ = (e) => (e.kind === "bot" ? [["tg-bot", "bot-db"], ["tg", "bot", "db"]] : e.kind === "web" ? [["br-web", "web-db"], ["br", "web", "db"]]
+    : e.kind === "log" ? [[], [e.rid ? "web" : "bot"]] : [[], ["db"]]);
+  const flashEvent = (e) => { const [edges, nodes] = route_(e); flash([...edges, ...nodes], e.bad); };
+
+  // --- графики ---
+  const chart = (title, sub) => {
+    const body = h("div", { class: "chart" });
+    return { body, node: h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", { text: title }), h("span", { class: "sub", text: sub })), h("div", { class: "card-body" }, body)) };
+  };
+  const drawLine = (el, a, b, labelA, labelB) => {
+    if (a.length < 2) { el.innerHTML = '<div class="faint feed-empty">Пока мало данных — график появится через пару секунд</div>'; return; }
+    const W = 600, H = 120, n = a.length;
+    const path = (vals, max) => vals.map((v, i) => `${(i / (n - 1) * W).toFixed(1)},${(H - 4 - v / (max || 1) * (H - 10)).toFixed(1)}`);
+    const maxA = Math.max(1, ...a), maxB = Math.max(1, ...b);
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><path class="area" d="M0,${H}L${path(a, maxA).join("L")}L${W},${H}Z"/><path class="la" d="M${path(a, maxA).join("L")}"/><path class="lb" d="M${path(b, maxB).join("L")}"/></svg>`
+      + `<div class="legend"><span class="la">${labelA}: макс ${maxA}</span><span class="lb">${labelB}: макс ${maxB}</span></div>`;
+  };
+  const live = chart("Последние 5 минут", "каждая точка — секунда");
+  const hour = chart("Последний час", "каждая точка — минута, хранится неделю");
+  const drawCharts = () => {
+    const last = series.slice(-300);
+    drawLine(live.body, last.map((p) => p.req), last.map((p) => p.p95), "запросов/с", "p95, мс");
+    drawLine(hour.body, history.map((r) => r.requests), history.map((r) => r.p95), "запросов/мин", "p95, мс");
+  };
+
+  // --- лента ---
+  const feed = h("div", { class: "feed", role: "log", "aria-live": "off" });
+  const status = h("span", { class: "pill", text: "подключаюсь…" });
+  const pass = (e) => ui.kinds.has(e.kind) && (ui.noise || !e.noise) && (!ui.onlyBad || e.bad || (e.status >= 400) || e.level === "WARNING")
+    && (!ui.rid || e.rid === ui.rid);
+  const row = (e) => {
+    const cls = "ev ev-" + e.kind + (e.bad ? " bad" : e.status >= 400 || e.level === "WARNING" ? " warn" : "") + (ui.rid && e.rid === ui.rid ? " pick" : "");
+    const meta = [e.status, e.ms != null ? `${e.ms} мс` : null, e.level, e.who].filter((x) => x != null && x !== "");
+    const el = h("div", { class: cls, tabindex: e.rid ? "0" : null, title: e.rid ? "Показать всё с этим номером запроса" : "" },
+      h("span", { class: "t mono", text: e.at }), h("span", { class: "k", text: KINDS[e.kind][0] }),
+      h("span", { class: "x" }, e.text, meta.length ? h("span", { class: "m faint", text: " · " + meta.join(" · ") }) : null),
+      e.rid ? h("span", { class: "rid mono faint", text: e.rid }) : null);
+    if (e.rid) el.addEventListener("click", () => { ui.rid = ui.rid === e.rid ? null : e.rid; redrawFeed(); drawFilters(); });
+    return el;
+  };
+  const redrawFeed = () => fill(feed, events.filter(pass).slice(-FEED_MAX).reverse().map(row),
+    events.some(pass) ? null : h("div", { class: "faint feed-empty", text: "Пока ничего нет по этим фильтрам" }));
+  const filters = h("div", { class: "chips" });
+  const drawFilters = () => fill(filters,
+    Object.entries(KINDS).map(([k, [label]]) => h("button", { type: "button", class: "chip" + (ui.kinds.has(k) ? " on" : ""),
+      onclick: () => { ui.kinds.has(k) ? ui.kinds.delete(k) : ui.kinds.add(k); drawFilters(); redrawFeed(); } }, label)),
+    h("button", { type: "button", class: "chip" + (ui.onlyBad ? " on" : ""), onclick: () => { ui.onlyBad = !ui.onlyBad; drawFilters(); redrawFeed(); } }, "Только проблемы"),
+    h("button", { type: "button", class: "chip" + (ui.noise ? " on" : ""), title: "Фоновые запросы страницы: онлайн, счётчики", onclick: () => { ui.noise = !ui.noise; drawFilters(); redrawFeed(); } }, "Фоновые"),
+    ui.rid ? h("button", { type: "button", class: "chip on", onclick: () => { ui.rid = null; drawFilters(); redrawFeed(); } }, `запрос ${ui.rid} ✕`) : null);
+  const pause = button("Пауза", { kind: "sm", onClick: () => {
+    ui.paused = !ui.paused; pause.querySelector(".lbl").textContent = ui.paused ? "Продолжить" : "Пауза"; if (!ui.paused) redrawFeed();
+  } });
+
+  // --- соединение ---
+  const onMessage = (msg) => {
+    if (msg.type === "hello") {
+      events = msg.events; series = msg.series; snap = msg.snapshot; fmtSnap(snap); drawCharts(); redrawFeed();
+    } else if (msg.type === "event") {
+      events.push(msg.event); if (events.length > 1500) events.shift();
+      flashEvent(msg.event);
+      if (!ui.paused && pass(msg.event)) { feed.prepend(row(msg.event)); while (feed.children.length > FEED_MAX) feed.lastChild.remove(); feed.querySelector(".feed-empty")?.remove(); }
+    } else if (msg.type === "tick") {
+      snap = msg.snapshot; fmtSnap(snap); if (msg.point) { series.push(msg.point); if (series.length > 300) series.shift(); }
+      drawCharts();
+    }
+  };
+  const connect = () => {
+    if (closed) return;
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/live`);
+    ws.onopen = () => { retry = 1000; status.className = "pill ok"; status.textContent = "в эфире"; };
+    ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)); } catch (err) { /* битое сообщение пропускаем */ } };
+    ws.onclose = () => {
+      status.className = "pill bad"; status.textContent = "нет связи — подключаюсь снова";
+      if (!closed) { reconnectTimer = setTimeout(connect, retry); retry = Math.min(retry * 2, 10000); }
+    };
+    ws.onerror = () => ws.close();
+  };
+  state.cleanups.push(() => { closed = true; clearTimeout(reconnectTimer); if (ws) ws.close(); });
+
+  const loadHistory = async () => { try { history = (await api("/api/metrics?minutes=60")).history; drawCharts(); } catch (e) { /* график часа — не критично */ } };
+  every(60000, loadHistory);
+
+  fill(page,
+    pageHead("Live", { tag: "Администрирование", sub: "Что происходит на сервере прямо сейчас: запросы, бот, логи и действия. Тексты сообщений людей сюда не попадают.", actions: [status] }),
+    h("div", { class: "grid joined live-tiles" }, Object.values(tiles).map((t) => t.node)),
+    h("div", { class: "grid two" }, h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", { text: "Схема" }), h("span", { class: "sub", text: "вспыхивает при каждом событии" })),
+      h("div", { class: "card-body" }, flowSvg)), live.node),
+    hour.node,
+    h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", { text: "Лента событий" }), h("span", { class: "sub", text: "нажми на событие с номером — покажу всё, что к нему относится" }), h("div", { class: "right" }, pause)),
+      h("div", { class: "card-body" }, filters, feed)));
+  drawFilters(); drawCharts(); redrawFeed();
+  await loadHistory();
+  connect();
+};
+
 PAGES.server = async (page, _, token) => {
   page.append(pageHead("Сервер", { tag: "Администрирование" }), loadingCard());
   const draw = async () => {

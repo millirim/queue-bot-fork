@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import aiosqlite
 
 import config
+from metrics import M
 from features import FEATURES, ROLES as ROLES_FOR_FEATURES
 from ranking import Row, apply_swaps, draw_lot, order
 
@@ -141,6 +142,20 @@ CREATE TABLE IF NOT EXISTS swaps (
     created_at TEXT NOT NULL,               -- ISO, местное время
     ended_at   TEXT,                        -- когда закончился или отменён
     ended_by   INTEGER                      -- кто сдал и этим закончил обмен (для отмены «Сдал» в течение минуты)
+);
+
+-- Нагрузка по минутам (metrics.py): хранится неделю, по ней график за час на странице «Live».
+CREATE TABLE IF NOT EXISTS metrics_minute (
+    minute     TEXT PRIMARY KEY,            -- ISO до минуты, местное время
+    requests   INTEGER NOT NULL,            -- веб-запросов за минуту
+    errors     INTEGER NOT NULL,            -- из них с ответом 5xx
+    updates    INTEGER NOT NULL,            -- обновлений бота
+    log_errors INTEGER NOT NULL,            -- строк лога уровня ERROR и выше
+    p50        REAL NOT NULL,               -- медиана времени ответа, мс
+    p95        REAL NOT NULL,               -- 95-й процентиль, мс
+    cpu        REAL NOT NULL,               -- процессор процесса, %
+    rss_mb     REAL NOT NULL,               -- память процесса, МБ
+    lag_ms     REAL NOT NULL                -- насколько опаздывает цикл событий, мс
 );
 
 -- Когда человек последний раз пользовался веб-панелью и ботом (для «онлайн» и «был в сети»).
@@ -1167,12 +1182,33 @@ class Database:
         )
         return dict(row)
 
+    # --- нагрузка по минутам ---
+    METRICS_KEEP_DAYS = 7
+
+    async def save_metrics_minute(self, row: dict) -> None:
+        minute = local_now().replace(second=0, microsecond=0).isoformat(timespec="minutes")
+        await self._write(
+            "INSERT OR REPLACE INTO metrics_minute (minute, requests, errors, updates, log_errors, p50, p95, cpu, rss_mb, lag_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (minute, row["requests"], row["errors"], row["updates"], row["log_errors"], row["p50"], row["p95"], row["cpu"],
+             row["rss_mb"], row["lag_ms"]))
+
+    async def metrics_history(self, minutes: int = 60) -> list[dict]:
+        since = (local_now() - timedelta(minutes=minutes)).isoformat(timespec="minutes")
+        rows = await self._all("SELECT * FROM metrics_minute WHERE minute >= ? ORDER BY minute", (since,))
+        return [dict(r) for r in rows]
+
+    async def prune_metrics(self) -> None:
+        before = (local_now() - timedelta(days=self.METRICS_KEEP_DAYS)).isoformat(timespec="minutes")
+        await self._write("DELETE FROM metrics_minute WHERE minute < ?", (before,))
+
     # --- журнал ---
     async def log_action(self, actor_id: int, actor_name: str, text: str) -> None:
         await self._write(
             "INSERT INTO audit (at, actor_id, actor_name, text) VALUES (?, ?, ?, ?)",
             (local_now().isoformat(timespec="seconds"), actor_id, actor_name, text),
         )
+        M.record_action(actor_name, text)
 
     async def journal(self, limit: int = 40) -> list[AuditRecord]:
         """Последние действия, новые сверху."""
