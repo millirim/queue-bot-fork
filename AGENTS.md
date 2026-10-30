@@ -36,6 +36,9 @@ Telegram-бот «живая очередь на сдачу лаб» для од
 | `deploy/` | установка на Debian, команда `queue-bot`, systemd, бэкапы, дежурный ответчик на время перезапуска (`maintenance.py`) |
 | `tests/` | pytest + сквозной сценарий на поддельном Telegram (`harness.py`) |
 
+## Интерфейс
+Переписывание веб-интерфейса: задание, ограничения и стенд — `docs/UI-REWRITE.md`; предпросмотр на вымышленных данных — `tools/ui_preview/`.
+
 ## Команды
 ```bash
 pip install -r requirements.txt pytest
