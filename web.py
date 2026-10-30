@@ -23,7 +23,8 @@ from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.types import ReplyKeyboardRemove
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
+import aiohttp
 from aiohttp import web
 
 import broadcast
@@ -37,7 +38,8 @@ from admin import (
     notify, notify_minus, publish_poll, remind_poll, remove_poll, finish_poll, clean_poll_options, request_plain, request_text,
     valid_emoji,
 )
-from features import FEATURES, ROLE_TITLES
+from features import FEATURES, GAME_KINDS, ROLE_TITLES
+from games import ticket as games_ticket
 from common import (
     POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_creator, kb, send, send_many, set_commands, short_name,
     staff_kind, web_allowed, web_role, ago, is_online,
@@ -867,6 +869,132 @@ async def api_swap_cancel(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# ================= игры (отдельная служба games/) =================
+GAMES_MAX_PROXIED = 100
+GAMES_SESSION = web.AppKey("games_session", aiohttp.ClientSession)
+_games_open = 0
+_invites: dict[tuple[int, int], float] = {}
+
+
+def games_url(path: str) -> str:
+    return f"http://127.0.0.1:{config.GAMES_PORT}{path}"
+
+
+async def games_allowed(db: Database, v: Viewer) -> list[str]:
+    """Какие игры включены этому человеку (по функциям game_<ключ>)."""
+    return [k for k in GAME_KINDS if await feature_ok(db, v, f"game_{k}")]
+
+
+async def games_probe(request: web.Request, path: str, timeout: float = 1.5) -> dict | None:
+    """Короткий запрос к службе игр; None — не отвечает. Падение игр панель не задевает."""
+    if not config.GAMES_PORT:
+        return None
+    try:
+        async with request.app[GAMES_SESSION].get(games_url(path), timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+            return await response.json() if response.status == 200 else None
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return None
+
+
+async def api_games_status(request: web.Request) -> web.Response:
+    v = await need(request, feature="games")
+    db = db_of(request)
+    health = await games_probe(request, "/health")
+    return web.json_response({"up": bool(health), "configured": bool(config.GAMES_PORT and config.GAMES_SECRET), "kinds": await games_allowed(db, v)})
+
+
+async def api_games_people(request: web.Request) -> web.Response:
+    """Кого можно позвать сыграть: люди из группы с ботом и включёнными играми (имена, без Telegram ID)."""
+    v = await need_student(request, "games")
+    db = db_of(request)
+    out = []
+    for s in await db.students():
+        if s.linked and s.id != v.student.id:
+            role = "admin" if s.admin else "starosta" if s.starosta else "user"
+            if is_creator(s.chat_id) or await db.feature_on("games", role):
+                out.append({"id": s.id, "name": s.name})
+    return web.json_response(out)
+
+
+async def api_games_invite(request: web.Request) -> web.Response:
+    """Зовёт друга за стол: сообщение в Telegram с кнопкой, которая открывает панель сразу на этом столе."""
+    v = await need_student(request, "games")
+    db = db_of(request)
+    data = await body(request)
+    code, friend_id = str(data.get("room", "")).upper(), data.get("to")
+    friend = await db.get_student(friend_id) if isinstance(friend_id, int) else None
+    if friend is None or not friend.linked or not friend.active or friend.id == v.student.id:
+        raise Fail("Этого человека позвать нельзя")
+    if not re.fullmatch(r"[A-Z0-9]{5}", code):
+        raise Fail("Неверный код стола")
+    role = "admin" if friend.admin else "starosta" if friend.starosta else "user"
+    if not is_creator(friend.chat_id) and not await db.feature_on("games", role):
+        raise Fail("Игры у этого человека выключены")
+    now = time.monotonic()
+    if now - _invites.get((v.chat_id, friend.id), -1e9) < 10:
+        raise Fail("Приглашение только что отправлено — подожди несколько секунд", 429)
+    room = await games_probe(request, f"/room/{code}")
+    if not room:
+        raise Fail("Такого стола уже нет", 404)
+    _invites[(v.chat_id, friend.id)] = now
+    url = f"{config.WEB_URL}/?room={code}"  # через параметр, а не #: Telegram сам пишет свои данные в часть после #
+    markup = None
+    if config.WEB_URL.startswith("https://"):
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть стол", web_app=WebAppInfo(url=url))]])
+    text = f"{esc(short_name(v.student.name))} зовёт тебя сыграть: {esc(room['title'])}. Стол {code}." + ("" if markup else f"\n{esc(url)}")
+    if await send(bot_of(request), friend.chat_id, text, markup) is None:
+        raise Fail("Сообщение не дошло: человек, возможно, заблокировал бота", 502)
+    return web.json_response({"ok": True})
+
+
+async def api_games_ws(request: web.Request) -> web.StreamResponse:
+    """Прокси WebSocket к службе игр. Тут проверяются сессия, роль, включённые игры и Origin; служба получает подписанный билет."""
+    global _games_open
+    v = await need(request, feature="games")
+    if not origin_ok(request):
+        raise Fail("Запрос отклонён", 403)
+    if not (config.GAMES_PORT and config.GAMES_SECRET):
+        raise Fail("Игры не настроены на сервере", 503)
+    if _games_open >= GAMES_MAX_PROXIED:
+        raise Fail("Игры перегружены, попробуй чуть позже", 503)
+    kinds = await games_allowed(db_of(request), v)
+    name = short_name(v.student.name) if v.student else f"ID {v.chat_id}"
+    token = games_ticket.make(config.GAMES_SECRET, {"id": v.chat_id, "n": name, "r": v.view, "g": kinds})
+    try:
+        upstream = await request.app[GAMES_SESSION].ws_connect(games_url(f"/ws?ticket={token}"), max_msg_size=64 * 1024, timeout=aiohttp.ClientWSTimeout(ws_close=3))
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        raise Fail("Игры сейчас недоступны — служба не отвечает. Очередь и бот работают как обычно.", 503)
+    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=16 * 1024)
+    await ws.prepare(request)
+    _games_open += 1
+
+    async def pump(src, dst):
+        async for msg in src:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                await dst.send_str(msg.data)
+            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                break
+
+    tasks = [asyncio.create_task(pump(ws, upstream)), asyncio.create_task(pump(upstream, ws))]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        _games_open -= 1
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await upstream.close()
+        await ws.close()
+    return ws
+
+
+async def games_session_ctx(app: web.Application):
+    session = aiohttp.ClientSession()
+    app[GAMES_SESSION] = session
+    yield
+    await session.close()
+
+
 # ================= нагрузка и «Live» (только админ) =================
 def origin_ok(request: web.Request) -> bool:
     """WebSocket открывает только наша страница: Origin совпадает с WEB_URL или с адресом, по которому зашли."""
@@ -1234,6 +1362,7 @@ async def api_server(request: web.Request) -> web.Response:
         "uptime": time.time() - STARTED, "started": STARTED * 1000, "db_size": size,
         "python": sys.version.split()[0], "timezone": str(config.TIMEZONE), "web_roles": sorted(config.WEB_ROLES),
         "sessions": await db_of(request).web_session_count(v.chat_id),
+        "games": await games_probe(request, "/stats", 1.0),
     })
 
 
@@ -1320,6 +1449,7 @@ async def index(request: web.Request) -> web.FileResponse:
 def make_app(db: Database, bot: Bot) -> web.Application:
     app = web.Application(middlewares=[middleware], client_max_size=1024 * 1024)  # картинки рассылки читаются по частям
     app[DB], app[BOT] = db, bot
+    app.cleanup_ctx.append(games_session_ctx)
     r = app.router
     r.add_get("/", index)
     r.add_get("/login", index)
@@ -1329,6 +1459,10 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_post("/api/logout", api_logout)
     r.add_get("/api/me", api_me)
     r.add_get("/api/overview", api_overview)
+    r.add_get("/api/games/status", api_games_status)
+    r.add_get("/api/games/people", api_games_people)
+    r.add_post("/api/games/invite", api_games_invite)
+    r.add_get("/api/games/ws", api_games_ws)
     r.add_get("/api/replication", api_replication)
     r.add_post("/api/replication/run", api_replication_run)
     r.add_get("/api/metrics", api_metrics)

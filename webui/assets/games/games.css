@@ -1,0 +1,10 @@
+/* Раздел «Игры»: лобби, столы, панель стола. Свои стили у каждой игры — в <игра>.css */
+.games { display: grid; gap: 16px; }
+.games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 16px; }
+.games-card .games-title { margin: 0 0 6px; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+.games-card p { margin: 0 0 10px; }
+.games-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.games-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.games-bar .row-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+.games-play { min-width: 0; }
+.games .hidden { display: none; }

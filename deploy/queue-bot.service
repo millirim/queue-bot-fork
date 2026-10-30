@@ -13,6 +13,8 @@ StateDirectory=queue-bot
 StateDirectoryMode=0750
 Environment=DB_PATH=/var/lib/queue-bot/queue.db PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/queue-bot/env
+# Секрет для билетов в игры (создаёт deploy/common.sh); «-» — файла может ещё не быть.
+EnvironmentFile=-/etc/queue-bot/games.env
 # Остановился (перезапуск, обновление, падение) — на это время дежурный отвечает «подождите» (deploy/maintenance.py).
 # «+» — выполнить с правами root вне песочницы, «-» — сбой не мешает остановке. Когда бот снова опрашивает Telegram,
 # дежурный получает 409 и сам уходит.

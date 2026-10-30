@@ -1,0 +1,75 @@
+/* Змейка. Цвета — только переменные панели, поэтому работают во всех трёх темах (поле рисуется в canvas теми же переменными). Классы с префиксом snake-. */
+
+.snake { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 480px; margin: 0 auto; min-width: 0; }
+
+.snake-stats { display: flex; gap: 8px; min-width: 0; }
+.snake-stat {
+  flex: 1 1 0; min-width: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); text-align: center;
+}
+.snake-stat-l { font: 500 10.5px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+.snake-stat-v { font: 600 20px/1.25 var(--font); font-variant-numeric: tabular-nums; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+
+.snake-bar { display: flex; gap: 8px; }
+.snake-btn {
+  flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; height: 40px; padding: 0 16px; min-width: 0;
+  border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+  font-weight: 500; white-space: nowrap; cursor: pointer; touch-action: manipulation;
+  transition: background .12s, border-color .12s;
+}
+.snake-btn:hover { background: var(--surface-3); }
+.snake-btn:disabled { opacity: .45; cursor: not-allowed; }
+.snake-btn-main { background: var(--brand); border-color: var(--brand); color: var(--brand-text); }
+.snake-btn-main:hover { background: color-mix(in srgb, var(--brand) 86%, #000); border-color: color-mix(in srgb, var(--brand) 86%, #000); }
+
+/* поле: квадрат; свайпы по нему не должны прокручивать страницу */
+.snake-board {
+  position: relative; width: 100%; aspect-ratio: 1 / 1; overflow: hidden; container-type: inline-size;
+  border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-2);
+  touch-action: none; user-select: none; -webkit-user-select: none;
+}
+.snake-canvas { display: block; width: 100%; height: 100%; }
+.snake-overlay {
+  position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; padding: 12px;
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  animation: snake-fade .2s ease-out backwards;
+}
+.snake-overlay.hidden { display: none; }
+.snake-card {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: 100%; padding: 18px 22px; text-align: center;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+@keyframes snake-fade { from { opacity: 0; } to { opacity: 1; } }
+.snake-over-title { font: 600 clamp(20px, 7cqw, 30px)/1.2 var(--font); letter-spacing: -.02em; color: var(--text); margin-bottom: 4px; }
+.snake-over-line { color: var(--text-2); font-size: 15px; }
+.snake-over-record { color: var(--brand); font: 600 13px/1.4 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+.snake-overlay .snake-btn { flex: none; margin-top: 10px; min-width: 150px; }
+
+.snake-hint { font-size: 13px; text-align: center; margin: 0; }
+
+/* экранные стрелки: на узком экране и на сенсорных устройствах */
+.snake-pad {
+  display: none; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(2, 56px); gap: 8px; justify-content: center;
+}
+.snake-key {
+  border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); color: var(--text);
+  font: 600 24px/1 var(--font); cursor: pointer; touch-action: manipulation; user-select: none; -webkit-user-select: none;
+}
+.snake-key:active { background: var(--surface-3); }
+.snake-key-u { grid-column: 2; grid-row: 1; }
+.snake-key-l { grid-column: 1; grid-row: 2; }
+.snake-key-d { grid-column: 2; grid-row: 2; }
+.snake-key-r { grid-column: 3; grid-row: 2; }
+@media (max-width: 640px), (pointer: coarse) {
+  .snake-pad { display: grid; }
+  .snake-hint { display: none; }
+}
+@media (max-width: 420px) {
+  .snake { gap: 10px; }
+  .snake-stat { padding: 6px 6px; }
+  .snake-stat-v { font-size: 18px; }
+  .snake-btn { height: 38px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .snake-overlay { animation: none; }
+}

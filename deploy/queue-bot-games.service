@@ -1,0 +1,40 @@
+[Unit]
+Description=Игры для веб-панели (отдельная служба, не влияет на бота)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=queuebot
+Group=queuebot
+WorkingDirectory=/opt/queue-bot
+ExecStart=/opt/queue-bot/.venv/bin/python -m games
+# Только свой секрет для билетов: токена бота и основной базы у службы игр нет.
+EnvironmentFile=/etc/queue-bot/games.env
+Environment=GAMES_DB=/var/lib/queue-bot-games/games.db GAMES_HOST=127.0.0.1 GAMES_PORT=8081 PYTHONUNBUFFERED=1
+StateDirectory=queue-bot-games
+StateDirectoryMode=0750
+# Упала или зависла (сторожевой поток завершает процесс) — поднимется заново; бот и панель при этом работают.
+Restart=always
+RestartSec=3
+
+# Лимиты: игра не может съесть сервер.
+MemoryHigh=200M
+MemoryMax=256M
+CPUQuota=60%
+TasksMax=64
+LimitNOFILE=1024
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

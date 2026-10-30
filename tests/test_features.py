@@ -99,7 +99,9 @@ def test_web_respects_flags(tmp_path):
                 assert (await client.post("/api/login", json={"token": token}, headers=H)).status == 200
             await login(STUDENT)
             me = await (await client.get("/api/me")).json()
-            assert me["features"] == {"swap": True, "polls": True, "presence": False, "suggestions": True}, "«Кто онлайн» у студентов выключен по умолчанию"
+            feats = me["features"]
+            assert feats["swap"] and feats["polls"] and feats["suggestions"] and feats["games"] and all(feats[f"game_{k}"] for k in web.GAME_KINDS), "по умолчанию включено"
+            assert feats["presence"] is False, "«Кто онлайн» у студентов выключен по умолчанию"
             assert (await client.get("/api/features")).status == 403, "настройки видны только админу"
             await login(ADMIN)
             r = await client.post("/api/features", json={"feature": "polls", "role": "user", "enabled": False}, headers=H)

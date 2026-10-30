@@ -1,0 +1,143 @@
+/* Экран русских шашек. Цвета интерфейса берём из переменных панели (--surface, --text, --border, --brand ...); доска и шашки — свои,
+   чтобы читаться одинаково в светлой, тёмной и AMOLED-темах. */
+.checkers-root {
+  --checkers-light: color-mix(in srgb, var(--brand) 9%, #efe9df);
+  --checkers-dark: color-mix(in srgb, var(--brand) 34%, #7d7770);
+  --checkers-line: color-mix(in srgb, var(--checkers-dark) 70%, #000);
+  display: grid; gap: 14px; width: 100%; max-width: 100%; min-width: 0; margin: 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  font-family: var(--font); color: var(--text);
+}
+.checkers-root * { box-sizing: border-box; }
+.checkers-main, .checkers-side { display: grid; gap: 8px; min-width: 0; align-content: start; width: 100%; max-width: 620px; margin: 0 auto; }
+
+/* ---------- панель игрока ---------- */
+.checkers-player { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 4px 2px; min-width: 0; }
+.checkers-dot { flex: none; width: 12px; height: 12px; border-radius: 50%; border: 1px solid var(--text-3); }
+.checkers-dot.white { background: #f6f1e6; }
+.checkers-dot.black { background: #2b2b2b; }
+.checkers-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.checkers-player.turn .checkers-name::after {
+  content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 8px; border-radius: 50%;
+  background: var(--brand); vertical-align: middle;
+}
+.checkers-count { display: inline-flex; align-items: center; gap: 4px; flex: none; font: 600 12px/1 var(--mono); color: var(--text-2); }
+.checkers-mini { width: 18px; height: 18px; }
+.checkers-clock {
+  margin-left: auto; flex: none; min-width: 74px; padding: 5px 10px; border-radius: 8px; text-align: center;
+  font: 600 17px/1.1 var(--mono); font-variant-numeric: tabular-nums;
+  background: var(--surface-3); color: var(--text-2); border: 1px solid var(--border);
+}
+.checkers-player .checkers-count { margin-left: 4px; }
+.checkers-clock.run { background: var(--surface); color: var(--text); border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
+.checkers-clock.low { color: var(--bad); border-color: var(--bad); box-shadow: 0 0 0 1px var(--bad); }
+
+/* ---------- доска ---------- */
+.checkers-board-wrap { position: relative; width: 100%; }
+.checkers-board {
+  display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); width: 100%; aspect-ratio: 1;
+  border: 2px solid var(--checkers-line); border-radius: 6px; overflow: hidden; background: var(--checkers-dark);
+  user-select: none; -webkit-user-select: none; touch-action: manipulation;
+}
+.checkers-sq {
+  position: relative; display: block; min-width: 0; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 0;
+  appearance: none; -webkit-appearance: none; cursor: default; color: inherit; font: inherit;
+}
+.checkers-sq.light { background: var(--checkers-light); }
+.checkers-sq.dark { background: var(--checkers-dark); }
+.checkers-sq.can, .checkers-sq.must, .checkers-sq.mv, .checkers-sq.cap, .checkers-sq.sel, .checkers-sq.via { cursor: pointer; }
+.checkers-sq:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; z-index: 4; }
+.checkers-sq::before { content: ""; position: absolute; inset: 0; pointer-events: none; }
+.checkers-sq.last::before { background: color-mix(in srgb, #f0c020 46%, transparent); }
+.checkers-sq.sel::before { background: color-mix(in srgb, #2f7df6 55%, transparent); }
+.checkers-sq.via::before { background: color-mix(in srgb, #2f7df6 32%, transparent); }
+.checkers-sq.taken::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 34%; height: 34%; transform: translate(-50%, -50%) rotate(45deg);
+  background:
+    linear-gradient(color-mix(in srgb, var(--bad) 80%, transparent), color-mix(in srgb, var(--bad) 80%, transparent)) center / 100% 14% no-repeat,
+    linear-gradient(color-mix(in srgb, var(--bad) 80%, transparent), color-mix(in srgb, var(--bad) 80%, transparent)) center / 14% 100% no-repeat;
+  pointer-events: none; z-index: 2;
+}
+.checkers-sq.mv::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 30%; height: 30%; border-radius: 50%;
+  transform: translate(-50%, -50%); background: color-mix(in srgb, #111 40%, transparent); pointer-events: none; z-index: 2;
+}
+.checkers-sq.cap::after {
+  content: ""; position: absolute; inset: 12%; border-radius: 50%; pointer-events: none; z-index: 2;
+  border: 4px solid color-mix(in srgb, var(--bad) 85%, #fff);
+  box-shadow: 0 0 0 1px color-mix(in srgb, #000 35%, transparent);
+}
+.checkers-sq.can:hover::before { background: color-mix(in srgb, #fff 22%, transparent); }
+.checkers-sq.must { box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--bad) 80%, #fff); }
+.checkers-sq.must::before { background: color-mix(in srgb, var(--bad) 40%, transparent); animation: checkers-pulse 1.4s ease-in-out infinite; }
+@keyframes checkers-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+.checkers-coord { position: absolute; z-index: 3; font: 700 10px/1 var(--mono); pointer-events: none; opacity: .9; }
+.checkers-coord.rank { left: 3px; top: 3px; }
+.checkers-coord.file { right: 3px; bottom: 3px; }
+.checkers-sq.light .checkers-coord { color: var(--checkers-dark); }
+.checkers-sq.dark .checkers-coord { color: var(--checkers-light); }
+
+/* ---------- шашки ---------- */
+.checkers-pc { display: block; }
+.checkers-sq > .checkers-pc { position: absolute; left: 7%; top: 5%; width: 86%; height: 86%; z-index: 1; pointer-events: none; filter: drop-shadow(0 2px 1.5px rgba(0, 0, 0, .35)); }
+.checkers-sq.doomed > .checkers-pc { opacity: .38; }
+.checkers-pc .edge { stroke-width: 2; }
+.checkers-pc .top { stroke-width: 2.5; }
+.checkers-pc .ring { fill: none; stroke-width: 2.2; }
+.checkers-pc .crown { fill: #f0bd2c; stroke: #6d4d05; stroke-width: 3; stroke-linejoin: round; }
+.checkers-pc.w .edge { fill: #a99f88; stroke: #6f6755; }
+.checkers-pc.w .top { fill: #f7f2e6; stroke: #7d7461; }
+.checkers-pc.w .ring { stroke: #cdc4ad; }
+.checkers-pc.b .edge { fill: #0c0c0c; stroke: #000; }
+.checkers-pc.b .top { fill: #38363a; stroke: #151416; }
+.checkers-pc.b .ring { stroke: #5b585e; }
+
+/* ---------- состояние, кнопки, ходы ---------- */
+.checkers-status { display: grid; gap: 4px; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); }
+.checkers-status-main { font-weight: 600; overflow-wrap: anywhere; }
+.checkers-status-note { font-size: 13px; color: var(--text-2); }
+.checkers-status.turn { background: var(--brand-soft); border-color: var(--brand); }
+.checkers-status.win { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+.checkers-status.lose { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+.checkers-status.draw { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+.checkers-status.win .checkers-status-note, .checkers-status.lose .checkers-status-note, .checkers-status.draw .checkers-status-note { color: inherit; }
+
+.checkers-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.checkers-btn {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 42px; padding: 0 16px; max-width: 100%;
+  border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+  font-weight: 500; white-space: nowrap; cursor: pointer; flex: 1 1 auto;
+}
+.checkers-btn:hover { background: var(--surface-3); }
+.checkers-btn:disabled { opacity: .5; cursor: not-allowed; }
+.checkers-btn.primary { background: var(--brand); border-color: var(--brand); color: var(--brand-text); }
+.checkers-btn.primary:hover { background: color-mix(in srgb, var(--brand) 86%, #000); }
+.checkers-btn.danger { color: var(--bad); }
+.checkers-btn.danger:hover { background: var(--bad-soft); border-color: var(--bad); }
+.checkers-btn.danger.fill { background: var(--bad); border-color: var(--bad); color: #fff; }
+
+.checkers-label { font: 500 11px/1.3 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); margin-bottom: 4px; }
+.checkers-moves-box { min-width: 0; }
+.checkers-moves {
+  max-height: 200px; overflow-y: auto; overflow-x: hidden; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); font: 13px/1.5 var(--mono);
+}
+.checkers-moves-empty { color: var(--text-3); padding: 2px 0; }
+.checkers-move-row { display: grid; grid-template-columns: 2.6em minmax(0, 1fr) minmax(0, 1fr); gap: 4px; padding: 1px 0; }
+.checkers-move-n { color: var(--text-3); }
+.checkers-move { padding: 0 4px; border-radius: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.checkers-move.last { background: var(--brand-soft); color: var(--brand); font-weight: 700; }
+
+/* ---------- широкий экран: доска слева, сведения справа ---------- */
+@media (min-width: 780px) {
+  .checkers-root { grid-template-columns: minmax(0, 600px) minmax(240px, 1fr); align-items: start; gap: 20px; }
+  .checkers-main, .checkers-side { max-width: none; margin: 0; }
+  .checkers-moves { max-height: 340px; }
+  .checkers-btn { flex: 0 1 auto; }
+}
+@media (max-width: 420px) {
+  .checkers-clock { min-width: 66px; font-size: 16px; padding: 5px 8px; }
+  .checkers-coord { font-size: 9px; }
+  .checkers-btn { padding: 0 12px; min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) { .checkers-root * { transition: none !important; animation: none !important; } }
