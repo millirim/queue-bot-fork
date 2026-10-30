@@ -63,3 +63,10 @@ def test_agents_file_is_short_and_linked():
     assert len(AGENTS.splitlines()) < 90, "AGENTS.md должен оставаться быстрым вводным файлом"
     assert "docs/ARCHITECTURE.md" in AGENTS
     assert "AGENTS.md" in (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+
+
+def test_every_games_file_is_documented():
+    games_doc = (ROOT / "docs" / "GAMES.md").read_text(encoding="utf-8")
+    for path in (ROOT / "games").glob("*.py"):
+        if path.name != "__init__.py" and path.name != "__main__.py":
+            assert f"games/{path.name}" in games_doc or f"`{path.name}`" in games_doc, f"games/{path.name} нет в таблице docs/GAMES.md"

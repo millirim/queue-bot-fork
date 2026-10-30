@@ -21,6 +21,12 @@ main() {
                  journalctl -u queue-bot-backup -n 1 -o cat --no-pager ;;
         config)  need_root queue-bot config; "${EDITOR:-nano}" "$CONF"
                  restart_and_check && say "Настройки применены ✓" || die "Бот не запустился: queue-bot logs" ;;
+        games)   case "${2:-status}" in
+                     status)  systemctl status queue-bot-games --no-pager -n 0 || true ;;
+                     logs)    journalctl -u queue-bot-games -f -n 50 ;;
+                     restart) need_root queue-bot games restart; systemctl restart queue-bot-games; say "Игры перезапущены ✓" ;;
+                     *) echo "queue-bot games [status|logs|restart]" ;;
+                 esac ;;
         version) version ;;
         *) cat <<HELP
 queue-bot — управление ботом очереди
@@ -29,6 +35,7 @@ queue-bot — управление ботом очереди
                            то же делает кнопка «🔄 Обновить бота» в Панели Админа
   queue-bot status         работает ли бот и какая версия
   queue-bot logs           логи в реальном времени (выход — Ctrl+C)
+  queue-bot games [status|logs|restart]   отдельная служба игр (её сбой не задевает бота)
   sudo queue-bot restart   перезапустить
   sudo queue-bot stop      остановить        sudo queue-bot start   запустить
   sudo queue-bot backup    сделать бэкап базы сейчас

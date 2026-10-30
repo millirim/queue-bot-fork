@@ -372,6 +372,28 @@ def test_second_tab_takes_over_and_oversized_message_is_refused(tmp_path):
     run(scenario())
 
 
+def test_reconnect_returns_to_the_table(tmp_path):
+    async def scenario():
+        store, client = await boot(tmp_path)
+        try:
+            a, _ = await connect(client, 1, "Аня"); b, _ = await connect(client, 2, "Боря")
+            await a.send_json({"t": "create", "kind": "coin", "options": {"buyin": 100}})
+            code = (await until(a, "state"))["room"]["code"]
+            await b.send_json({"t": "join", "room": code}); await until(b, "state")
+            await a.send_json({"t": "start"}); await room_state(a, "playing")
+            await a.close()
+            await asyncio.sleep(0.2)
+            a2, hello = await connect(client, 1, "Аня")
+            back = await room_state(a2, "playing")
+            assert back["seat"] == 0 and back["room"]["code"] == code, "после обрыва человек снова за своим столом и своим местом"
+            stats = await (await client.get("/stats")).json()
+            assert stats["rooms"] == 1
+            await a2.close(); await b.close()
+        finally:
+            await client.close(); await store.close()
+    run(scenario())
+
+
 def test_watchdog_kills_a_frozen_process():
     code = ("import time, threading\nfrom games.server import watchdog\n"
             "beat = [time.monotonic()]\nthreading.Thread(target=watchdog, args=(beat, 0.5), daemon=True).start()\ntime.sleep(15)\n")

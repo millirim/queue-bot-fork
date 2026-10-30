@@ -41,3 +41,8 @@ WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
 WEB_URL = (os.getenv("WEB_URL", "").strip() or f"http://{WEB_HOST}:{WEB_PORT}").rstrip("/")
 # Кому можно входить: admin, starosta, user через запятую. По умолчанию — всем, кто есть в списке группы.
 WEB_ROLES = {r for r in os.getenv("WEB_ROLES", "admin,starosta,user").replace(" ", "").split(",") if r} & {"admin", "starosta", "user"}
+
+# Игры (games/) работают отдельной службой: веб-панель проксирует к ней WebSocket. GAMES_PORT=0 — игры выключены.
+# GAMES_SECRET (общий с службой игр) создаёт deploy/common.sh в /etc/queue-bot/games.env.
+GAMES_PORT = int(os.getenv("GAMES_PORT", "8081") or 0)
+GAMES_SECRET = os.getenv("GAMES_SECRET", "")

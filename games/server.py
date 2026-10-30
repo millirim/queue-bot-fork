@@ -36,9 +36,11 @@ BEAT = web.AppKey("beat", list)
 BG = web.AppKey("bg", asyncio.Task)
 
 
-def lobby_payload(hub: Hub, conn: Conn) -> dict:
+async def lobby_payload(hub: Hub, conn: Conn) -> dict:
     allowed = conn.player.allowed
-    return {"t": "lobby", "games": [g.public() for k, g in hub.games.items() if k in allowed], "rooms": hub.room_list(allowed)}
+    chips = await hub.store.balance(conn.player.id)
+    return {"t": "lobby", "games": [g.public() for k, g in hub.games.items() if k in allowed], "rooms": hub.room_list(allowed),
+            "chips": chips, "can_topup": chips < 100}
 
 
 async def hello(hub: Hub, conn: Conn) -> None:
@@ -46,7 +48,7 @@ async def hello(hub: Hub, conn: Conn) -> None:
     bests = {k: await store.best(k, player.id) for k, g in hub.games.items() if g.solo and k in player.allowed}
     await conn.send({"t": "hello", "me": {"id": player.id, "name": player.name, "chips": await store.balance(player.id), "best": bests,
                                           "can_topup": await store.balance(player.id) < 100}})
-    await conn.send(lobby_payload(hub, conn))
+    await conn.send(await lobby_payload(hub, conn))
     if conn.room is not None:  # вернулся после обрыва — сразу показываем стол
         await conn.room.guarded(conn, lambda: conn.room.attach(conn))
 
@@ -94,7 +96,7 @@ async def solo_finish(hub: Hub, conn: Conn, msg: dict) -> None:
 async def handle(hub: Hub, conn: Conn, msg: dict) -> None:
     kind = msg.get("t")
     if kind == "lobby":
-        await conn.send(lobby_payload(hub, conn))
+        await conn.send(await lobby_payload(hub, conn))
     elif kind == "board":
         game = str(msg.get("kind"))
         info = hub.games.get(game)
@@ -141,7 +143,7 @@ async def handle(hub: Hub, conn: Conn, msg: dict) -> None:
             conn.room = None
             hub.dirty = True
         await conn.send({"t": "left", "room": room.code if room else None})
-        await conn.send(lobby_payload(hub, conn))
+        await conn.send(await lobby_payload(hub, conn))
     elif kind == "ping":
         await conn.send({"t": "pong"})
     else:
@@ -165,10 +167,8 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
     await ws.prepare(request)
     conn = Conn(ws, player)
     old = hub.conns.get(player.id)
+    conn.room = hub.seated.get(player.id)  # вернулся после обрыва или открыл вторую вкладку — стол и место за ним сохраняются
     if old is not None:  # открыто в другой вкладке — старую закрываем, стол достаётся новой
-        conn.room = old.room
-        if old.room is not None and old.room.conns.get(player.id) is old:
-            old.room.conns[player.id] = conn
         old.dead = True
         await old.ws.close(code=4000, message="Открыто в другой вкладке".encode())
     hub.conns[player.id] = conn
@@ -207,6 +207,14 @@ async def health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def room_info(request: web.Request) -> web.Response:
+    """Для приглашений: есть ли такой стол (панель проверяет код, прежде чем звать друга)."""
+    room = request.app[HUB].rooms.get(request.match_info["code"].upper())
+    if room is None or room.closed:
+        return web.json_response({"ok": False}, status=404)
+    return web.json_response({"ok": True, **room.public()})
+
+
 async def stats(request: web.Request) -> web.Response:
     hub: Hub = request.app[HUB]
     return web.json_response({"ok": True, "rooms": len(hub.rooms), "connections": len(hub.conns), "lag_ms": round(hub.lag_ms, 1),
@@ -222,7 +230,8 @@ async def background(hub: Hub, beat: list) -> None:
         hub.lag_ms = max(0.0, (time.monotonic() - started - 1.0) * 1000)
         if hub.dirty:
             hub.dirty = False
-            await asyncio.gather(*[c.send(lobby_payload(hub, c)) for c in list(hub.conns.values()) if c.room is None], return_exceptions=True)
+            for c in [c for c in list(hub.conns.values()) if c.room is None]:
+                await c.send(await lobby_payload(hub, c))
 
 
 def watchdog(beat: list, limit: float = WATCHDOG_SECONDS, exit_code: int = 70) -> None:
@@ -242,6 +251,7 @@ def make_app(store: Store, secret: str, games: dict[str, GameInfo] | None = None
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/health", health)
     app.router.add_get("/stats", stats)
+    app.router.add_get("/room/{code}", room_info)
 
     async def on_start(app: web.Application) -> None:
         refunded = await store.refund_all()  # столов после перезапуска нет — вложенные фишки возвращаются

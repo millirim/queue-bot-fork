@@ -140,6 +140,7 @@ class Room:
         self.seat_of[pid], self.pid_of[seat], self.names[pid] = seat, pid, player.name
         self.settled.discard(pid)
         self.conns[pid] = conn
+        self.hub.seated[pid] = self
         conn.room = self
         self.watchers.discard(conn)
 
@@ -162,6 +163,7 @@ class Room:
             self.conns.pop(pid, None)
             self.gone_since.pop(pid, None)
             self.seat_of.pop(pid, None)
+            self.hub.seated.pop(pid, None)
             if self.owner_id == pid and self.seat_of:
                 self.owner_id = next(iter(self.seat_of))
         if drop_connection and conn.room is self:
@@ -241,6 +243,7 @@ class Room:
                                 if returned:
                                     await self.credit(pid, returned)
                                 self.seat_of.pop(pid, None)
+                                self.hub.seated.pop(pid, None)
                                 changed = True
                         if self.game.finished:
                             await self.finish()
@@ -253,6 +256,7 @@ class Room:
                                     self.game.remove_player(pid)
                                     await self.credit(pid, self.stakes.get(pid, 0))
                                     self.seat_of.pop(pid, None); self.conns.pop(pid, None)
+                                    self.hub.seated.pop(pid, None)
                                     changed = True
                     if changed:
                         await self.broadcast()
@@ -279,6 +283,8 @@ class Room:
             if conn.room is self:
                 conn.room = None
             await conn.send({"t": "left", "room": self.code})
+        for pid in list(self.seat_of):
+            self.hub.seated.pop(pid, None)
         self.hub.rooms.pop(self.code, None)
         self.hub.dirty = True
 
@@ -293,6 +299,7 @@ class Hub:
         self.store, self.games = store, games
         self.conns: dict[int, Conn] = {}
         self.rooms: dict[str, Room] = {}
+        self.seated: dict[int, Room] = {}   # за каким столом сидит игрок (чтобы после обрыва связи вернуться на место)
         self.solo: dict[tuple[int, int], tuple[str, float]] = {}
         self.dirty = False
         self.started = time.time()

@@ -47,6 +47,7 @@ const ICONS = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
   vote: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  gamepad: '<rect x="3" y="8" width="18" height="10" rx="4"/><path d="M8 11v4M6 13h4M16 12h.01M18 14h.01"/>',
   pulse: '<path d="M3 12h4l2.5-6 4 12 2.5-6H21"/>',
   bulb: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17h.01"/>',
@@ -511,6 +512,7 @@ const NAV = [
     { id: "overview", label: "Обзор", ic: "home", min: "user" },
     { id: "queues", label: "Очереди", ic: "list", min: "user" },
     { id: "my", label: "Моё", ic: "user", min: "user", student: true, badge: "swaps" },
+    { id: "games", label: "Игры", ic: "gamepad", min: "user", feature: "games" },
     { id: "polls", label: "Голосования", ic: "vote", min: "user", badge: "polls", feature: "polls" },
     { id: "suggestions", label: "Предложения", ic: "bulb", min: "user", feature: "suggestions" },
     { id: "rules", label: "Как это работает", short: "Правила", ic: "help", min: "user" },
@@ -2044,6 +2046,10 @@ function startPresence() {
   ping();
 }
 
+// Для экранов игр (webui/assets/games/*.js): они грузятся раньше этого файла и берут помощники отсюда в момент открытия страницы.
+window.QB_APP = { h, fill, pageHead, button, toast, api, dialog, state, emptyState, loadingCard };
+PAGES.games = (page, param, token) => window.QB_GAMES.page(page, param, token);
+
 function setupTelegram() {
   if (!tg) return;
   document.documentElement.classList.add("tg");
@@ -2060,6 +2066,8 @@ function setupTelegram() {
 
 async function start() {
   setupTelegram();
+  const invited = new URLSearchParams(location.search).get("room");  // приглашение за стол: /?room=ABCDE
+  if (invited && /^[A-Za-z0-9]{5}$/.test(invited)) history.replaceState(null, "", `/#/games/${invited.toUpperCase()}`);
   if (tg) {
     try {
       await api("/api/login", { method: "POST", body: { initData: tg.initData } });
