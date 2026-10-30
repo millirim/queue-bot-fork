@@ -6,7 +6,7 @@ import re
 import time
 from datetime import datetime
 
-from aiogram import Bot
+from aiogram import BaseMiddleware, Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import (
     BotCommand, BotCommandScopeChat, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
@@ -14,7 +14,7 @@ from aiogram.types import (
 )
 
 import config
-from db import Database, Poll, Student, Subject
+from db import ONLINE_SECONDS, Database, Poll, Student, Subject
 from ranking import WANT, Row
 
 log = logging.getLogger(__name__)
@@ -346,3 +346,49 @@ def poll_markup(poll: Poll, mine: int | None = None) -> InlineKeyboardMarkup | N
     if poll.closed:
         return None
     return kb(*[[btn(("✅ " if option_id == mine else "") + option, f"pv:{poll.id}:{option_id}")] for option_id, option in poll.options])
+
+
+# --- онлайн и «был в сети» ---
+def is_online(web_at: datetime | None) -> bool:
+    return bool(web_at and (datetime.now(config.TIMEZONE).replace(tzinfo=None) - web_at).total_seconds() <= ONLINE_SECONDS)
+
+
+def ago(at: datetime | None) -> str:
+    """«только что», «5 мин назад», «сегодня 14:05», «вчера 18:40», «12.10 09:15», «давно не заходил(а)»."""
+    if at is None:
+        return "ещё не заходил(а)"
+    now = datetime.now(config.TIMEZONE).replace(tzinfo=None)
+    seconds = (now - at).total_seconds()
+    if seconds < 60:
+        return "только что"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} мин назад"
+    days = (now.date() - at.date()).days
+    clock = f"{at:%H:%M}"
+    if days == 0:
+        return f"сегодня {clock}"
+    if days == 1:
+        return f"вчера {clock}"
+    return f"{at:%d.%m} {clock}"
+
+
+def presence_line(web_at: datetime | None, bot_at: datetime | None) -> str:
+    """Строка для карточки человека: «🟢 онлайн в вебе · бот: 5 мин назад»."""
+    web = "🟢 онлайн в вебе" if is_online(web_at) else f"веб: {ago(web_at)}"
+    return f"{web} · бот: {ago(bot_at)}"
+
+
+class ActivityMiddleware(BaseMiddleware):
+    """Отмечает любое действие человека в боте (для «был в сети»); сбой записи боту не мешает."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is not None:
+            try:
+                await self.db.touch(user.id, "bot")
+            except Exception:
+                log.exception("Не удалось отметить активность %s", user.id)
+        return await handler(event, data)

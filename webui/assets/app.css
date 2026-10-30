@@ -199,9 +199,9 @@ kbd { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; f
 /* Строка показателей — единая сетка с общими линиями, как блок «Transparent pricing / Security / Privacy» */
 .grid.joined { position: relative; gap: 0; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); border: 1px solid var(--border); background: var(--surface); overflow: visible; }
 .grid.joined > * { border: 0; border-radius: 0; box-shadow: -1px 0 0 var(--border), 0 -1px 0 var(--border); background: none; }
-.stat { padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 6px; color: inherit; min-width: 0; }
+.stat { padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 6px; color: inherit; min-width: 0; container-type: inline-size; }
 a.stat:hover { text-decoration: none; background: var(--surface-2); }
-.stat .value { font-size: 32px; font-weight: 500; letter-spacing: -.04em; font-variant-numeric: tabular-nums; line-height: 1.05; }
+.stat .value { font-size: clamp(14px, 12cqw, 32px); white-space: nowrap; font-weight: 500; letter-spacing: -.04em; font-variant-numeric: tabular-nums; line-height: 1.05; }
 .stat .hint { font-size: 12.5px; color: var(--text-3); }
 
 /* Приветствие с большим поиском — как поиск доменов в Registrar */
@@ -584,7 +584,7 @@ ol.rules { margin: 0; padding: 0; counter-reset: rule; display: grid; }
   .rt tr.link:hover td { background: none; }
   .journal .who { min-width: 0; }
   .stat { padding: 14px; }
-  .stat .value { font-size: 26px; }
+  .stat .value { font-size: clamp(14px, 12cqw, 26px); }
   .form-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .form-row > :first-child { grid-column: 1 / -1; }
   .overlay { align-items: flex-end; padding: 0; }
@@ -649,3 +649,6 @@ html.tg .status { padding-bottom: env(safe-area-inset-bottom); height: calc(var(
 @keyframes nick-flow { to { background-position: 0 0, 300% 0; } }
 @media (prefers-reduced-motion: reduce) { .nick-creator { animation: none; } }
 .nick-creator { white-space: nowrap; }
+
+/* «Кто онлайн» */
+.online-dot { display: inline-block; width: 8px; height: 8px; margin-left: 8px; border-radius: 50%; background: var(--ok); vertical-align: middle; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }

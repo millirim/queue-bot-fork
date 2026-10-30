@@ -153,6 +153,12 @@ function nick(text, who) {
   return h("span", { class: kind ? `nick nick-${kind}` : "", text });
 }
 
+// Зелёная точка «сейчас в веб-панели» (приходит, только если включена функция «Кто онлайн»).
+function onlineDot(who) {
+  return who && who.online ? h("span", { class: "online-dot", title: "Сейчас в веб-панели", "aria-label": "онлайн" }) : null;
+}
+const seenText = (who) => (who && who.web_ago !== undefined ? `${who.online ? "онлайн в вебе" : `веб: ${who.web_ago}`} · бот: ${who.bot_ago}` : null);
+
 function rolePill(s) {
   if (s.creator) return h("span", { class: "pill brand", text: "Создатель" });
   if (!s.linked && s.role !== "user") return h("span", { class: "pill", text: `${ROLE[s.role]} · после входа` });
@@ -982,7 +988,7 @@ PAGES.queue = async (page, sid, token) => {
       const open = () => { state.onPersonChange = refresh; openPerson(r.id); };
       body.push(h("tr", { class: (r.me ? "me " : "") + (data.editable ? "link" : ""), onclick: data.editable ? open : null },
         h("td", { class: "place", text: i + 1 }),
-        h("td", { class: "lead" }, h("span", { class: "name" }, nick(r.name, r)),
+        h("td", { class: "lead" }, h("span", { class: "name" }, nick(r.name, r), onlineDot(r)),
           r.swapped ? h("span", { class: "pill info", title: "Стоит на месте по обмену", text: "обмен" }) : null,
           r.me ? h("span", { class: "faint", text: " · это ты" }) : null),
         h("td", null, r.subgroup ? `${r.subgroup} подгр.` : h("span", { class: "faint", text: "—" })),
@@ -1254,8 +1260,9 @@ PAGES.people = async (page, pid, token) => {
     const shown = list.filter((s) => pred(s) && match(s));
     const rows = shown.map((s) => h("button", { class: "list-row", type: "button", onclick: () => { location.hash = `#/people/${s.id}`; } },
       h("div", { class: "grow" },
-        h("span", { class: "title" }, nick(s.name, s)),
+        h("span", { class: "title" }, nick(s.name, s), onlineDot(s)),
         h("span", { class: "meta" }, s.username ? h("span", { class: "mono", text: `@${s.username}` }) : null,
+          seenText(s) ? h("span", { class: "faint", text: seenText(s) }) : null,
           h("span", { text: s.subgroup ? `${s.subgroup} подгруппа` : "подгруппа не указана" }))),
       h("div", { class: "end" }, rolePill(s), ui.inactive ? h("span", { class: "pill bad", text: "убран из группы" }) : botPill(s), icon("chevron"))));
     const inBot = list.filter((s) => s.linked).length;
@@ -1342,7 +1349,8 @@ async function openPerson(id) {
 
   const draw = () => {
     fill(head,
-      h("div", { class: "titles" }, h("span", { class: "label", text: "Карточка" }), h("h2", null, nick(p.name, p)),
+      h("div", { class: "titles" }, h("span", { class: "label", text: "Карточка" }), h("h2", null, nick(p.name, p), onlineDot(p)),
+        seenText(p) ? h("div", { class: "faint", text: seenText(p) }) : null,
         h("div", { class: "chips" }, p.active ? botPill(p) : h("span", { class: "pill bad", text: "убран из группы" }), rolePill(p),
           p.subgroup ? h("span", { class: "pill", text: `${p.subgroup} подгруппа` }) : null)),
       button("", { kind: "ghost icon", ic: "x", title: "Закрыть", onClick: async () => closeDrawer() }));
@@ -1854,9 +1862,20 @@ async function boot() {
   try { saved = sessionStorage.getItem("qb-view"); } catch (e) { /* не страшно */ }
   state.view = state.me.views.includes(saved) ? saved : state.me.view;
   renderShell();
+  startPresence();
   if (!location.hash) history.replaceState(null, "", "#/overview");
   await route();
   refreshBadges();
+}
+
+// «Я здесь»: раз в 20 секунд, пока вкладка открыта и видна (по этому показываются «онлайн» и «был в сети»).
+let presenceTimer = null;
+function startPresence() {
+  const ping = () => { if (state.me && document.visibilityState === "visible") api("/api/presence", { method: "POST", body: {} }).catch(() => {}); };
+  if (presenceTimer) return;
+  presenceTimer = setInterval(ping, 20000);
+  document.addEventListener("visibilitychange", ping);
+  ping();
 }
 
 function setupTelegram() {

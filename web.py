@@ -36,7 +36,7 @@ from admin import (
 from features import FEATURES, ROLE_TITLES
 from common import (
     POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_creator, kb, send, send_many, set_commands, short_name,
-    staff_kind, web_allowed, web_role,
+    staff_kind, web_allowed, web_role, ago, is_online,
 )
 from db import ROLES, SUGGESTION_STATUSES, Database, Student, local_now, parse_roster
 from handlers import places
@@ -150,6 +150,8 @@ async def need(request: web.Request, role: str = "user", feature: str | None = N
         raise Fail("Это только для админов" if role == "admin" else "Это только для старост и админов", 403)
     if feature and not await feature_ok(db_of(request), v, feature):
         raise Fail("Эта функция для тебя выключена", 403)
+    if request.method != "GET":  # любое действие в панели — признак того, что человек здесь
+        await db_of(request).touch(v.chat_id, "web")
     return v
 
 
@@ -264,6 +266,27 @@ async def api_me(request: web.Request) -> web.Response:
 RULE_LINES = [html.unescape(re.sub(r"<[^>]+>", "", line)) for line in RULES.splitlines() if line.strip()]
 
 
+async def api_presence(request: web.Request) -> web.Response:
+    """Сигнал «я здесь»: страница шлёт его раз в ~20 секунд, пока вкладка открыта и видна."""
+    v = await need(request)
+    await db_of(request).touch(v.chat_id, "web")
+    return web.json_response({"ok": True})
+
+
+async def presence_map(db: Database, v: Viewer) -> dict[int, dict] | None:
+    """chat_id → {online, web_at, bot_at} для тех, кому включено «Кто онлайн»; иначе None."""
+    if not await feature_ok(db, v, "presence"):
+        return None
+    return {chat: {"online": is_online(web), "web_at": iso(web), "bot_at": iso(bot), "web_ago": ago(web), "bot_ago": ago(bot)}
+            for chat, (web, bot) in (await db.activity()).items()}
+
+
+def with_presence(item: dict, seen: dict[int, dict] | None, chat_id: int | None) -> dict:
+    if seen is not None and chat_id is not None:
+        item.update(seen.get(chat_id, {"online": False, "web_at": None, "bot_at": None, "web_ago": ago(None), "bot_ago": ago(None)}))
+    return item
+
+
 async def api_badges(request: web.Request) -> web.Response:
     """Счётчики для меню: заявки и новые предложения (старостам), входящие обмены и неотвеченные голосования (себе)."""
     v = await need(request)
@@ -316,12 +339,15 @@ async def queue_json(db: Database, v: Viewer, subject) -> dict:
     rows = await db.queue(subject.id)
     me_id = v.student.id if v.student else None
     people = {s.id: s for s in await db.students()}
+    seen = await presence_map(db, v)
     out, me = [], None
     for place, r in enumerate(rows, 1):
         who = people.get(r.student_id)
         item = {"place": place, "id": r.student_id, "name": r.name, "done": r.done, "wants": r.wants,
                 "in_bot": r.in_bot, "subgroup": r.subgroup, "me": r.student_id == me_id, "swapped": r.swapped,
                 "role": who.role if who and who.linked else "user", "creator": bool(who and who.linked and is_creator(who.chat_id))}
+        if seen is not None and who and who.linked:
+            item["online"] = seen.get(who.chat_id, {}).get("online", False)
         out.append(item)
         if item["me"]:
             me = dict(item)
@@ -524,13 +550,16 @@ async def api_people(request: web.Request) -> web.Response:
     inactive = request.query.get("inactive") == "1"
     if inactive and not v.at_least("admin"):
         raise Fail("Это только для админов", 403)
-    return web.json_response([student_json(s) for s in await db_of(request).students(active=not inactive)])
+    db = db_of(request)
+    seen = await presence_map(db, v)
+    return web.json_response([with_presence(student_json(s), seen, s.chat_id) for s in await db.students(active=not inactive)])
 
 
 async def api_person(request: web.Request) -> web.Response:
-    await need(request, "starosta")
+    v = await need(request, "starosta")
     db = db_of(request)
-    return web.json_response(await person_json(db, await load_person(db, request)))
+    s = await load_person(db, request)
+    return web.json_response(with_presence(await person_json(db, s), await presence_map(db, v), s.chat_id))
 
 
 async def api_people_add(request: web.Request) -> web.Response:
@@ -1209,6 +1238,7 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_post("/api/logout", api_logout)
     r.add_get("/api/me", api_me)
     r.add_get("/api/overview", api_overview)
+    r.add_post("/api/presence", api_presence)
     r.add_get("/api/badges", api_badges)
     r.add_get("/api/features", api_features)
     r.add_post("/api/features", api_feature_set)
