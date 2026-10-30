@@ -21,14 +21,14 @@ log = logging.getLogger(__name__)
 
 
 # --- права ---
-def is_owner(chat_id: int) -> bool:
-    """Главный админ — из ADMIN_IDS в настройках сервера. Его нельзя снять из бота."""
-    return chat_id in config.ADMIN_IDS
+def is_creator(chat_id: int) -> bool:
+    """Создатель — из CREATOR_IDS (раньше ADMIN_IDS) в настройках сервера. Его нельзя снять из бота."""
+    return chat_id in config.CREATOR_IDS
 
 
 def is_admin(chat_id: int, student: Student | None = None) -> bool:
-    """Главный админ или админ, назначенный в боте."""
-    return is_owner(chat_id) or bool(student and student.admin)
+    """Создатель или админ, назначенный в боте."""
+    return is_creator(chat_id) or bool(student and student.admin)
 
 
 def is_staff(chat_id: int, student: Student | None) -> bool:

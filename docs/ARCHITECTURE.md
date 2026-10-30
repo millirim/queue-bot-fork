@@ -27,7 +27,7 @@ Telegram-бот «живая очередь на сдачу лаб» для **о
 | `bottom.py` | Роутер нижней кнопки «🏠 На главную» (под полем ввода). Подключён **первым**. |
 | `handlers.py` | Роутер студента: регистрация, очередь, «Сдал/Отменить/−1», «Моё», `/start /help /my /cancel`, запасные обработчики. |
 | `admin.py` | Роутер Панели Админа (`/admin`) и панели старосты (`/moderator`): заявки, люди, подгруппы, сданные, рассылка, журнал, предметы, копия базы. |
-| `common.py` | Общее: права (`is_owner/is_admin/is_staff`), отправка (`show`, `send`, `send_many`, `edit_sent`), форматирование (`esc`, `kb`, `btn`, `queue_text`, `short_name`), команды меню по ролям, кулдаун «Обновить», фильтр подгруппы. |
+| `common.py` | Общее: права (`is_creator/is_admin/is_staff`), отправка (`show`, `send`, `send_many`, `edit_sent`), форматирование (`esc`, `kb`, `btn`, `queue_text`, `short_name`), команды меню по ролям, кулдаун «Обновить», фильтр подгруппы. |
 | `logsink.py` | Серверные логи в таблицу `server_log` (хендлер `logging` + фоновая задача). |
 | `web.py` | Веб-панель: aiohttp-приложение в процессе бота, вход по ссылке из бота, JSON-API (раздел 14). |
 | `webui/` | Интерфейс веб-панели: `index.html`, `assets/app.js`, `assets/app.css`, `assets/theme.js`, `assets/mark.svg`. |
@@ -45,12 +45,12 @@ Telegram-бот «живая очередь на сдачу лаб» для **о
 ## 3. Запуск (`main.py`)
 
 1. `logging.basicConfig(INFO)` и `logsink.install()` — те же логи пишутся и в базу.
-2. Проверка `BOT_TOKEN`; если `ADMIN_IDS` пуст — предупреждение (заявки тогда принимаются автоматически).
+2. Проверка `BOT_TOKEN`; если `CREATOR_IDS` пуст — предупреждение (заявки тогда принимаются автоматически).
 3. `Database.connect()` (раздел 4.3), запуск фоновой задачи `logsink.flusher`.
 4. `Dispatcher`, `dp["db"] = db` (хендлеры получают `db: Database` аргументом).
 5. **Порядок роутеров важен:** сначала `bottom.router` (нажатие нижней кнопки не должно попасть в ввод причины, списка или рассылки), затем `admin.router`, потом `handlers.router` — в конце `handlers.py` стоят
    «запасные» обработчики (`stale_callback`, `fallback_message`), которые ловят всё подряд.
-6. Команды меню: всем `BASE_COMMANDS`; админам (`ADMIN_IDS` и назначенным) добавляется `/admin`, старостам `/moderator`
+6. Команды меню: всем `BASE_COMMANDS`; админам (`CREATOR_IDS` и назначенным) добавляется `/admin`, старостам `/moderator`
    (`set_commands` с `BotCommandScopeChat`).
 7. `web.start(db, bot)` — веб-панель на `WEB_HOST:WEB_PORT` (раздел 14); порт занят — ошибка в лог, бот работает дальше.
 8. `start_polling`. При остановке: запись «Бот остановлен», сброс последних логов, закрытие базы.
@@ -224,9 +224,9 @@ end_swap/_end_swaps`.
 | студент (`user`) | по умолчанию | очередь, 🙋, «Сдал», «Отменить», «Попросить −1», «Моё» |
 | староста (`starosta`) | `students.role` | + `/moderator`: заявки, ФИО, сданные и 🙋 за других, рассылка, журнал действий |
 | админ (`admin`) | `students.role` | + `/admin`: список группы, подгруппы, роли, отвязка Telegram, убрать/вернуть, предметы, серверные логи, копия базы |
-| главный админ | `config.ADMIN_IDS` | как админ, **плюс** его нельзя снять из бота; может работать, даже не выбрав себя из списка |
+| создатель 👑 | `config.CREATOR_IDS` (раньше `ADMIN_IDS` — читается тоже) | как админ, **плюс** его нельзя снять из бота; может работать, даже не выбрав себя из списка |
 
-Функции (`common.py`): `is_owner(chat_id)` — в `ADMIN_IDS`; `is_admin(chat_id, student)` — владелец или `student.admin`;
+Функции (`common.py`): `is_creator(chat_id)` — в `CREATOR_IDS`; `is_admin(chat_id, student)` — создатель или `student.admin`;
 `is_staff` — админ или староста; `staff_kind` → `'admin'` / `'moderator'` / `None`; `panel_name(kind)` — «Панель Админа»
 или «Панель старосты». В `admin.py` каждый обработчик начинается с `need_staff(target, db, admin_only=False)`;
 `admin_only=True` пускает только админов. Проверка прав всегда на сервере, прятать кнопку недостаточно.
@@ -236,7 +236,7 @@ end_swap/_end_swaps`.
 ## 7. Основные сценарии
 
 **Регистрация.** `/start` без привязки → `show_roster` (свободные имена, `students.chat_id IS NULL`) → «Это я» →
-`create_request` + `notify_reviewers` (всем из `ADMIN_IDS` и `staff_chats()`; сообщения запоминаются в `request_notices`).
+`create_request` + `notify_reviewers` (всем из `CREATOR_IDS` и `staff_chats()`; сообщения запоминаются в `request_notices`).
 Проверяющий жмёт ✅/❌ → `db.approve`/`reject` → `close_notices` меняет сообщение у **всех** проверяющих на итог без кнопок.
 Одно имя — один аккаунт (`link` отказывает, если имя уже занято). Если `ADMIN_IDS` пуст или пишет главный админ —
 привязка сразу, без заявки. Если имя с ролью — проверяющего предупреждают.
@@ -339,7 +339,7 @@ end_swap/_end_swaps`.
 
 ```
 /opt/queue-bot          код (git-клон; можно стереть и скачать заново)
-/etc/queue-bot/env      настройки: BOT_TOKEN, ADMIN_IDS, TIMEZONE (+ GROUP_NO при желании); root, права 600
+/etc/queue-bot/env      настройки: BOT_TOKEN, CREATOR_IDS, TIMEZONE (+ GROUP_NO при желании); root, права 600
 /var/lib/queue-bot      queue.db и backups/ (владелец queuebot)
 /usr/local/bin/queue-bot  → /opt/queue-bot/deploy/queue-bot   (команда управления)
 ```
@@ -366,7 +366,7 @@ end_swap/_end_swaps`.
 приносит код, второй (новая) через `apply_code` ставит службы и `version` — `update` вызывает `apply_code` и когда
 обновлять нечего. Экран кнопки сам подсказывает это, пока служб нет.
 
-Переменные окружения (`config.py`): `BOT_TOKEN` (обязательно), `ADMIN_IDS`, `DB_PATH`, `TIMEZONE`, `GROUP_NO`
+Переменные окружения (`config.py`): `BOT_TOKEN` (обязательно), `CREATOR_IDS` (и старое имя `ADMIN_IDS`), `DB_PATH`, `TIMEZONE`, `GROUP_NO`
 (только для имени файла копии базы), `WEB_PORT`, `WEB_HOST`, `WEB_URL`, `WEB_ROLES` (веб-панель, раздел 14).
 
 ## 12. Тесты

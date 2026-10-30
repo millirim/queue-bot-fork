@@ -34,7 +34,7 @@ from admin import (
     valid_emoji,
 )
 from common import (
-    POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_owner, kb, send, send_many, set_commands, short_name,
+    POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_creator, kb, send, send_many, set_commands, short_name,
     staff_kind, web_allowed, web_role,
 )
 from db import ROLES, SUGGESTION_STATUSES, Database, Student, local_now, parse_roster
@@ -70,7 +70,7 @@ class Fail(Exception):
 
 @dataclass
 class Viewer:
-    """Кто смотрит: chat_id, человек из списка (может не быть у главного админа), настоящая роль и роль просмотра."""
+    """Кто смотрит: chat_id, человек из списка (может не быть у создателя), настоящая роль и роль просмотра."""
     chat_id: int
     student: Student | None
     role: str
@@ -157,7 +157,7 @@ async def journal(db: Database, v: Viewer, text: str) -> None:
 def student_json(s: Student) -> dict:
     return {
         "id": s.id, "name": s.name, "active": s.active, "linked": s.linked, "username": s.username,
-        "chat_id": s.chat_id, "role": s.role, "subgroup": s.subgroup, "owner": is_owner(s.chat_id or 0),
+        "chat_id": s.chat_id, "role": s.role, "subgroup": s.subgroup, "creator": is_creator(s.chat_id or 0),
     }
 
 
@@ -241,7 +241,7 @@ async def api_me(request: web.Request) -> web.Response:
     return web.json_response({
         "chat_id": v.chat_id, "name": v.student.name if v.student else None,
         "student": student_json(v.student) if v.student else None,
-        "role": v.role, "view": v.view, "views": views, "owner": is_owner(v.chat_id),
+        "role": v.role, "view": v.view, "views": views, "creator": is_creator(v.chat_id),
         "group": config.GROUP_NO, "version": updater.current_version(),
         "sessions": await db_of(request).web_session_count(v.chat_id),
         "rules": RULE_LINES,
@@ -560,7 +560,7 @@ async def api_person_subgroup(request: web.Request) -> web.Response:
 
 
 async def api_person_role(request: web.Request) -> web.Response:
-    """Как cb_person_role: главного админа не трогаем, убранному роль не меняем."""
+    """Как cb_person_role: создателя не трогаем, убранному роль не меняем."""
     v = await need(request, "admin")
     db, bot = db_of(request), bot_of(request)
     s = await load_person(db, request)
@@ -569,8 +569,8 @@ async def api_person_role(request: web.Request) -> web.Response:
         raise Fail("Нет такой роли")
     if not s.active:
         raise Fail("Сначала верни человека в группу")
-    if is_owner(s.chat_id or 0):
-        raise Fail("Это главный админ из настроек сервера — его роль в боте не меняется", 403)
+    if is_creator(s.chat_id or 0):
+        raise Fail("Это создатель из настроек сервера — его роль в боте не меняется", 403)
     if s.role != role:
         await db.set_role(s.id, role)
         if s.linked:
@@ -588,8 +588,8 @@ async def api_person_unlink(request: web.Request) -> web.Response:
     db, bot = db_of(request), bot_of(request)
     s = await load_person(db, request)
     if chat_id := await db.unlink(s.id):
-        await set_commands(bot, chat_id, "admin" if is_owner(chat_id) else None)
-        if not is_owner(chat_id):
+        await set_commands(bot, chat_id, "admin" if is_creator(chat_id) else None)
+        if not is_creator(chat_id):
             await db.web_logout(chat_id=chat_id)
         await journal(db, v, f"Telegram отвязан от {s.name}")
         await send(bot, chat_id, "⌨️ Кнопки под полем ввода убраны.", ReplyKeyboardRemove())
@@ -607,7 +607,7 @@ async def api_person_active(request: web.Request) -> web.Response:
         await db.set_active(s.id, active)
         if s.linked:
             await set_commands(bot, s.chat_id, staff_kind(s.chat_id, await db.get_student(s.id)))
-            if not active and not is_owner(s.chat_id):
+            if not active and not is_creator(s.chat_id):
                 await db.web_logout(chat_id=s.chat_id)
         await journal(db, v, f"{s.name} {'возвращён(а) в группу' if active else 'убран(а) из группы'}")
         await notify(bot, s, "↩️ Тебя вернули в группу — бот снова доступен." if active
@@ -943,7 +943,7 @@ async def api_suggestion_add(request: web.Request) -> web.Response:
     sid = await db.add_suggestion(None if anonymous else v.student.id, text, public)
     who = "анонимно" if anonymous else f"от {esc(v.student.name)}"
     where = "видно всей группе" if public else "только старостам и админам"
-    reviewers = sorted((config.ADMIN_IDS | set(await db.staff_chats())) - {v.chat_id})
+    reviewers = sorted((config.CREATOR_IDS | set(await db.staff_chats())) - {v.chat_id})
     await send_many(bot_of(request), reviewers,
                     f"💡 <b>Новое предложение</b> #{sid} ({who}, {where})\n\n{esc(text[:1500])}\n\n"
                     "<i>Ответить — в веб-панели → Предложения.</i>")

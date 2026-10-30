@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 import config
 from admin import close_notices, notify_minus, notify_reviewers
 from common import (
-    MENU_BTN, bottom_for, btn, esc, poll_markup, poll_text, is_owner, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view, short_name,
+    MENU_BTN, bottom_for, btn, esc, poll_markup, poll_text, is_creator, is_staff, kb, panel_name, queue_text, refresh_wait, rows_of, set_commands, send, set_subgroup_view, short_name,
     show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed, web_role,
 )
 from db import Database, Student
@@ -67,7 +67,7 @@ async def require_student(target: Message | CallbackQuery, db: Database) -> Stud
 # ================= регистрация: выбор себя из списка =================
 async def show_roster(target: Message | CallbackQuery, db: Database, ack: bool = True):
     free = await db.free_students()
-    admin_note = "\n\n<i>Ты админ: Панель Админа доступна по /admin и без выбора себя.</i>" if is_owner(target.from_user.id) else ""
+    admin_note = "\n\n<i>Ты админ: Панель Админа доступна по /admin и без выбора себя.</i>" if is_creator(target.from_user.id) else ""
     if not free:
         await show(
             target,
@@ -123,9 +123,9 @@ async def cb_pick_confirm(cb: CallbackQuery, db: Database):
         await show_roster(cb, db, ack=False)
         return
     # Без админов принимать заявки некому — тогда сразу в бот.
-    if is_owner(chat_id) or not config.ADMIN_IDS:
+    if is_creator(chat_id) or not config.CREATOR_IDS:
         student = await db.link(chat_id, cb.from_user.username, student_id)
-        if is_owner(chat_id):
+        if is_creator(chat_id):
             await set_commands(cb.bot, chat_id, "admin")
         await show(cb, f"✅ Готово, <b>{esc(student.name)}</b>!\n\n{HELP}", await main_menu(db, chat_id, student))
         await send(cb.bot, chat_id, "⌨️ Кнопки меню теперь и под полем ввода 👇", await bottom_for(db, chat_id))
@@ -331,8 +331,8 @@ async def minus_reason(msg: Message, state: FSMContext, db: Database):
 
 # ================= моё =================
 def role_label(chat_id: int, student: Student) -> str:
-    if is_owner(chat_id):
-        return "главный админ ♒️"
+    if is_creator(chat_id):
+        return "создатель 👑"
     return "админ ♒️" if student.admin else "староста ✴️" if student.starosta else "студент ✅"
 
 

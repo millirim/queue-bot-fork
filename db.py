@@ -22,7 +22,7 @@ LOG_KEEP = 5000    # сколько последних серверных лог
 
 SCHEMA = """
 -- Список группы. Аккаунт Telegram привязывается к человеку из списка после подтверждения.
--- Админы задаются в ADMIN_IDS и могут не быть в списке.
+-- Создатели задаются в CREATOR_IDS (раньше ADMIN_IDS) и могут не быть в списке.
 CREATE TABLE IF NOT EXISTS students (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     name     TEXT NOT NULL UNIQUE,
@@ -213,7 +213,7 @@ class Student:
 
     @property
     def admin(self) -> bool:
-        """Админ, назначенный в боте (главные админы — в ADMIN_IDS, их здесь нет)."""
+        """Админ, назначенный в боте (создатели — в CREATOR_IDS, их здесь нет)."""
         return self.active and self.linked and self.role == "admin"
 
 

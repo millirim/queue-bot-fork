@@ -38,7 +38,7 @@ async def subject_id(db: Database, name: str) -> int:
 
 @pytest.fixture(autouse=True)
 def _no_env_admins(monkeypatch):
-    monkeypatch.setattr(config, "ADMIN_IDS", set())
+    monkeypatch.setattr(config, "CREATOR_IDS", set())
 
 
 def test_parse_roster_skips_numbers_header_and_expelled():

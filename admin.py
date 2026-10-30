@@ -1,7 +1,7 @@
 """Панель Админа (/admin) и панель старосты (/moderator). Староста: заявки, ФИО, правка сданных, рассылка,
 журнал действий. Админ — ещё список группы, роли (студент/староста/админ), отвязка аккаунтов, предметы,
 серверные логи и копия базы.
-Главные админы (ADMIN_IDS в настройках сервера) — как админы, но их нельзя снять из бота.
+Создатели (CREATOR_IDS в настройках сервера) — как админы, но их нельзя снять из бота.
 Каждое действие пишется в журнал, а тому, кого оно касается, приходит уведомление."""
 import asyncio
 import logging
@@ -20,7 +20,7 @@ from aiogram.types import (
 import broadcast
 import config
 from common import (
-    MENU_BTN, bottom_for, btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
+    MENU_BTN, bottom_for, btn, check_name, esc, is_admin, is_creator, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed,
     web_role, works, POLL_MAX_OPTIONS, POLL_OPTION_LEN, poll_markup, poll_text,
 )
@@ -158,7 +158,7 @@ def request_text(r: Request, full_name: str = "") -> str:
 
 async def notify_reviewers(bot: Bot, db: Database, request: Request, full_name: str) -> None:
     """Новая заявка — старостам и всем админам."""
-    reviewers = sorted(config.ADMIN_IDS | set(await db.staff_chats()))
+    reviewers = sorted(config.CREATOR_IDS | set(await db.staff_chats()))
     text = f"📨 <b>Новая заявка</b>\n\nTelegram {request_text(request, full_name)}\nЭто правда этот человек?"
     markup = kb([btn("✅ Принять", f"rq:ok:{request.chat_id}"), btn("❌ Отклонить", f"rq:no:{request.chat_id}")])
     for reviewer in reviewers:
@@ -200,7 +200,7 @@ def minus_text(m: MinusRequest) -> str:
 
 async def notify_minus(bot: Bot, db: Database, request: MinusRequest) -> None:
     """Заявка на −1 — старостам и админам, кроме самого просящего."""
-    reviewers = sorted((config.ADMIN_IDS | set(await db.staff_chats())) - {request.student.chat_id})
+    reviewers = sorted((config.CREATOR_IDS | set(await db.staff_chats())) - {request.student.chat_id})
     found = await db.get_row(request.subject.id, request.student.id)
     done = f" (сейчас {found[1].done}/{request.subject.total})" if found else ""
     text = f"🙏 <b>Заявка на −1</b>{done}\n\n{minus_text(request)}"
@@ -296,14 +296,15 @@ async def cb_review(cb: CallbackQuery, db: Database):
 
 # ================= люди =================
 ROLE_ICONS = {"admin": "♒️", "starosta": "✴️"}
+CREATOR_ICON = "👑"
 
 
 def person_icon(s: Student) -> str:
-    """❌ не зарегистрирован · ✅ студент · ✴️ староста · ♒️ админ."""
+    """❌ не зарегистрирован · ✅ студент · ✴️ староста · ♒️ админ · 👑 создатель."""
     if not s.linked:
         return "❌" + ROLE_ICONS.get(s.role, "")  # роль, назначенная заранее, включится после регистрации
-    if is_owner(s.chat_id):
-        return ROLE_ICONS["admin"]
+    if is_creator(s.chat_id):
+        return CREATOR_ICON
     return ROLE_ICONS.get(s.role, "✅")
 
 
@@ -407,7 +408,7 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
                  for n, t in ((1, "1 подгр."), (2, "2 подгр."), (0, "без подгр."))]
     rows = [*rows_of(progress), subgroups, [btn("✏️ Исправить ФИО", f"aun:{s.id}")]]
     if staff.admin:
-        if s.active and not is_owner(s.chat_id or 0):
+        if s.active and not is_creator(s.chat_id or 0):
             rows.append([
                 btn(("✓ " if s.role == role else "") + ROLE_BUTTONS[role], f"aur:{s.id}:{role}") for role in ROLES
             ])
@@ -465,8 +466,8 @@ ROLE_NOTES = {
 
 
 def role_title(s: Student) -> str:
-    if is_owner(s.chat_id or 0):
-        return "главный админ ♒️ (из настроек сервера)"
+    if is_creator(s.chat_id or 0):
+        return "создатель 👑 (из настроек сервера)"
     title = {"admin": "админ ♒️", "starosta": "староста ✴️"}.get(s.role, "студент ✅")
     return title if s.linked or s.role == "user" else f"{title} — получит, когда зарегистрируется"
 
@@ -539,8 +540,8 @@ async def cb_person_role(cb: CallbackQuery, db: Database):
     if not s.active:
         await cb.answer("Сначала верни человека в группу", show_alert=True)
         return
-    if is_owner(s.chat_id or 0):
-        await cb.answer("Это главный админ из настроек сервера — его роль в боте не меняется", show_alert=True)
+    if is_creator(s.chat_id or 0):
+        await cb.answer("Это создатель из настроек сервера — его роль в боте не меняется", show_alert=True)
         return
     if s.role == role:
         await cb.answer(f"Уже {ROLE_NAMES[role]}")
@@ -572,7 +573,7 @@ async def cb_person_unlink_ok(cb: CallbackQuery, db: Database):
         return
     chat_id = await db.unlink(s.id)
     if chat_id:
-        await set_commands(cb.bot, chat_id, "admin" if is_owner(chat_id) else None)
+        await set_commands(cb.bot, chat_id, "admin" if is_creator(chat_id) else None)
         await journal_add(db, staff, f"Telegram отвязан от {s.name}")
         await send(cb.bot, chat_id, "⌨️ Кнопки под полем ввода убраны.", ReplyKeyboardRemove())
         await send(cb.bot, chat_id, f"🔓 Твой Telegram отвязан от «{esc(s.name)}» ({esc(staff.signature)}). "

@@ -148,7 +148,7 @@ const ROLE = { admin: "Админ", starosta: "Староста", user: "Сту�
 const ROLE_PILL = { admin: "brand", starosta: "info", user: "" };
 
 function rolePill(s) {
-  if (s.owner) return h("span", { class: "pill brand", text: "Главный админ" });
+  if (s.creator) return h("span", { class: "pill brand", text: "Создатель" });
   if (!s.linked && s.role !== "user") return h("span", { class: "pill", text: `${ROLE[s.role]} · после входа` });
   return s.role === "user" ? null : h("span", { class: `pill ${ROLE_PILL[s.role]}`, text: ROLE[s.role] });
 }
@@ -593,7 +593,7 @@ function accountMenu(anchor) {
   action(out, async () => { await api("/api/logout", { method: "POST", body: {} }); closePopover(); state.me = null; history.replaceState(null, "", "/"); renderLogin(); });
   popover(anchor, [
     h("div", { class: "who" }, h("strong", { text: me.name || `Telegram ID ${me.chat_id}` }),
-      h("span", { class: "faint", text: me.owner ? "Главный админ" : ROLE[me.role] })),
+      h("span", { class: "faint", text: me.creator ? "Создатель" : ROLE[me.role] })),
     me.views.length > 1 ? [h("div", { class: "sep" }), h("div", { class: "label", text: "Смотреть как" }), viewSwitch()] : null,
     h("div", { class: "sep" }),
     h("div", { class: "label", text: "Тема" }),
@@ -1217,7 +1217,7 @@ const PEOPLE_FILTERS = [
   ["all", "Все", () => true],
   ["in", "В боте", (s) => s.linked],
   ["out", "Не в боте", (s) => !s.linked],
-  ["staff", "Старосты и админы", (s) => s.role !== "user" || s.owner],
+  ["staff", "Старосты и админы", (s) => s.role !== "user" || s.creator],
   ["g1", "1 подгр.", (s) => s.subgroup === 1],
   ["g2", "2 подгр.", (s) => s.subgroup === 2],
   ["g0", "Без подгруппы", (s) => !s.subgroup],
@@ -1351,7 +1351,7 @@ async function openPerson(id) {
         } })),
       h("div", { class: "setting" }, h("span", { class: "k", text: "Подгруппа" }),
         segmented([[1, "1"], [2, "2"], [0, "без"]], p.subgroup, (v) => post("subgroup", { subgroup: v }))),
-      can("admin") && p.active && !p.owner ? h("div", { class: "setting" }, h("span", { class: "k", text: "Роль" }),
+      can("admin") && p.active && !p.creator ? h("div", { class: "setting" }, h("span", { class: "k", text: "Роль" }),
         segmented([["user", "Студент"], ["starosta", "Староста"], ["admin", "Админ"]], p.role, async (v) => {
           if (!(await confirmDialog("Сменить роль", `${p.name}: ${ROLE[p.role].toLowerCase()} → ${ROLE[v].toLowerCase()}. Человеку придёт уведомление, меню в Telegram обновится.`, "Сменить"))) return false;
           await post("role", { role: v });

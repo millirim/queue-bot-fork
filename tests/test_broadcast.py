@@ -17,7 +17,7 @@ OWNER, STUDENT, OTHER = 1, 8, 9
 
 @pytest.fixture(autouse=True)
 def _settings(monkeypatch):
-    monkeypatch.setattr(config, "ADMIN_IDS", {OWNER})
+    monkeypatch.setattr(config, "CREATOR_IDS", {OWNER})
     monkeypatch.setattr(broadcast, "ALBUM_WAIT", 0.05)
 
 
