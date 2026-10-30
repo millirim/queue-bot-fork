@@ -11,6 +11,7 @@ import config
 import handlers
 import logsink
 import metrics
+import replication
 import updater
 import web
 from common import BASE_COMMANDS, ActivityMiddleware, set_commands, set_menu_button, staff_kind
@@ -35,6 +36,7 @@ async def main() -> None:
     await db.connect()
     flusher = asyncio.create_task(logsink.flusher(db))
     update_watcher = None
+    replicator = asyncio.create_task(replication.runner(db))  # копии базы на другие серверы (если настроены)
     collector = asyncio.create_task(metrics.collector(db))  # посекундные точки, нагрузка, сводка раз в минуту
     site = None
 
@@ -72,6 +74,7 @@ async def main() -> None:
         log.info("Бот остановлен")
         flusher.cancel()
         collector.cancel()
+        replicator.cancel()
         if update_watcher:
             update_watcher.cancel()
         if site:

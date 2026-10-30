@@ -1950,6 +1950,25 @@ PAGES.server = async (page, _, token) => {
       await api("/api/logout", { method: "POST", body: { everywhere: true } });
       state.me = null; history.replaceState(null, "", "/"); renderLogin();
     } });
+    const repl = await api("/api/replication");
+    const replBody = !repl.targets.length
+      ? [h("p", { class: "muted" }, "Не настроено. Копии шифруются и отправляются на другой сервер, сам сервер бота наружу не открывается. Впиши в ",
+          h("code", { text: "/etc/queue-bot/env" }), ": ", h("code", { text: "BACKUP_KEY" }), " (ключ шифрования, base64 от 32 байт) и ",
+          h("code", { text: "BACKUP_TARGETS" }), " (приёмники, JSON). Приёмник — ", h("code", { text: "deploy/receiver/queue-bot-receiver.py" }), ".")]
+      : [h("div", { class: "kv" }, ...repl.targets.flatMap((t) => [h("div", { class: "k", text: t.name }), h("div", { class: "mono", text: `${t.url} · хранит ${t.keep}` })]),
+          h("div", { class: "k", text: "Ключ шифрования" }), h("div", { class: repl.key_ok ? "" : "bad", text: repl.key_ok ? "задан" : "не задан или неверный — копии не уходят" }),
+          h("div", { class: "k", text: "Как часто" }), h("div", { class: "mono", text: `раз в ${repl.every_hours} ч` })),
+        repl.log.length ? h("div", { class: "list" }, repl.log.slice(0, 6).map((e) => h("div", { class: "list-row" },
+          h("div", { class: "grow" }, h("span", { class: "title", text: `${e.target} · ${e.ok ? "доставлено" : "не доставлено"}` }), h("span", { class: "meta", text: `${fmtWhen(e.at)} · ${fmtBytes(e.size)} · ${e.detail}` })),
+          h("span", { class: "pill " + (e.ok ? "ok" : "bad"), text: e.ok ? "ок" : "ошибка" })))) : null];
+    const replCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", { text: "Копии на других серверах" }),
+      h("span", { class: "sub", text: "шифруются на сервере бота, приёмник хранит только шифротекст" })),
+      h("div", { class: "card-body" }, replBody),
+      repl.targets.length ? h("div", { class: "card-foot" }, button("Отправить сейчас", { ic: "send", onClick: async () => {
+        const r = await api("/api/replication/run", { method: "POST", body: {} });
+        toast(r.results.every((x) => x.ok) ? "Копия доставлена" : `Не все приёмники ответили: ${r.results.filter((x) => !x.ok).map((x) => x.target).join(", ")}`, !r.results.every((x) => x.ok));
+        await draw();
+      } })) : null);
     const flags = await api("/api/features");
     const featuresCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", { text: "Функции по ролям" }),
       h("span", { class: "sub", text: "Очередь отключить нельзя. Создатель видит всё всегда." })),
@@ -1984,6 +2003,7 @@ PAGES.server = async (page, _, token) => {
         h("div", { class: "card nodes" }, h("div", { class: "card-head" }, h("h2", { text: "Копия базы" })),
           h("div", { class: "card-body" }, h("p", { class: "muted", text: "Полная копия одним zip-файлом (внутри queue.db). В ней все ФИО, Telegram ID и сданные — храни аккуратно и не пересылай." })),
           h("div", { class: "card-foot" }, backup))),
+      replCard,
       featuresCard,
       h("div", { class: "card danger-zone" }, h("div", { class: "list-row" },
         h("div", { class: "grow" }, h("span", { class: "title", text: "Сессии веб-панели" }), h("span", { class: "meta", text: "Если открывал панель на чужом компьютере — заверши все входы." })),
