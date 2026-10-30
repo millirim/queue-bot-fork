@@ -6,6 +6,7 @@
 Админ может посмотреть панель глазами старосты или студента (заголовок X-View-As) — это только понижение прав.
 Действия пишутся в тот же журнал (с пометкой «веб»), а людям приходят те же уведомления в Telegram.
 """
+import asyncio
 import hashlib
 import hmac
 import html
@@ -13,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sys
 import time
 from urllib.parse import parse_qsl
@@ -27,6 +29,7 @@ from aiohttp import web
 import broadcast
 import config
 import logsink
+from metrics import M, rid_var, who_var
 import updater
 from admin import (
     JOURNAL_PAGE, ROLE_NAMES, ROLE_NOTES, SERVER_MODES, Staff, close_notices, journal_add, minus_text,
@@ -129,6 +132,7 @@ async def viewer(request: web.Request) -> Viewer:
     role = web_role(chat_id, student)
     if not web_allowed(role):
         raise Fail("Веб-панель для тебя закрыта — роль изменилась", 403)
+    who_var.set(short_name(student.name) if student else f"ID {chat_id}")
     view = request.headers.get("X-View-As", role)
     if view not in RANK or RANK[view] > RANK[role]:
         view = role
@@ -862,6 +866,58 @@ async def api_swap_cancel(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# ================= нагрузка и «Live» (только админ) =================
+def origin_ok(request: web.Request) -> bool:
+    """WebSocket открывает только наша страница: Origin совпадает с WEB_URL или с адресом, по которому зашли."""
+    origin = request.headers.get("Origin", "").rstrip("/")
+    if not origin:
+        return True  # не браузер (например, тест): куки всё равно нужны
+    return origin in (config.WEB_URL.rstrip("/"), f"{request.scheme}://{request.host}")
+
+
+async def api_metrics(request: web.Request) -> web.Response:
+    await need(request, "admin")
+    try:
+        minutes = max(1, min(int(request.query.get("minutes", "60")), 7 * 24 * 60))
+    except ValueError:
+        minutes = 60
+    return web.json_response({"history": await db_of(request).metrics_history(minutes), "snapshot": M.snapshot()})
+
+
+async def api_live(request: web.Request) -> web.StreamResponse:
+    """Поток событий и цифр в реальном времени: сначала «hello» (последние события и график), потом по событию и раз в секунду «tick»."""
+    await need(request, "admin")
+    if not origin_ok(request):
+        raise Fail("Запрос отклонён", 403)
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+    queue = M.subscribe()
+    reader = asyncio.create_task(_drain(ws))
+    try:
+        await ws.send_json({"type": "hello", "events": list(M.events)[-200:], "series": [M.point(b) for b in list(M.seconds)[-300:]],
+                            "snapshot": M.snapshot()})
+        last_tick = time.monotonic()
+        while not ws.closed and not reader.done():
+            try:
+                await ws.send_json({"type": "event", "event": await asyncio.wait_for(queue.get(), 0.5)})
+            except asyncio.TimeoutError:
+                pass
+            if time.monotonic() - last_tick >= 1.0:
+                last_tick = time.monotonic()
+                await ws.send_json({"type": "tick", "snapshot": M.snapshot(), "point": M.point(M.seconds[-1]) if M.seconds else None})
+    except (ConnectionError, asyncio.CancelledError):
+        pass
+    finally:
+        M.unsubscribe(queue)
+        reader.cancel()
+    return ws
+
+
+async def _drain(ws: web.WebSocketResponse) -> None:
+    async for _ in ws:  # клиент ничего не шлёт; чтение нужно, чтобы aiohttp обработал закрытие и ping
+        pass
+
+
 # ================= видимость функций =================
 def features_json(flags: dict) -> list[dict]:
     return [{"key": f.key, "title": f.title, "hint": f.hint,
@@ -1204,6 +1260,10 @@ async def api_backup(request: web.Request) -> web.Response:
 @web.middleware
 async def middleware(request: web.Request, handler):
     api = request.path.startswith("/api/")
+    rid = secrets.token_hex(3)  # номер запроса: он же попадает в строки логов, написанные во время запроса (metrics.py)
+    rid_var.set(rid)
+    who_var.set(None)
+    started = time.perf_counter()
     # Чужой сайт не может добавить свой заголовок к запросу без CORS, а CORS мы не разрешаем — это защита от CSRF.
     if api and request.method != "GET" and request.headers.get("X-Queue-Bot") != "1":
         response = web.json_response({"error": "Запрос отклонён"}, status=403)
@@ -1214,9 +1274,17 @@ async def middleware(request: web.Request, handler):
             response = web.json_response({"error": str(e)}, status=e.status)
         except web.HTTPException as e:
             if not api:
+                M.record_request(request.method, request.path, e.status, (time.perf_counter() - started) * 1000, who_var.get(), rid)
                 raise
             response = web.json_response({"error": e.reason}, status=e.status)
+        except Exception:
+            log.exception("Необработанная ошибка в %s %s", request.method, request.path)
+            response = web.json_response({"error": "Внутренняя ошибка сервера"}, status=500)
+    M.record_request(request.method, request.path, response.status, (time.perf_counter() - started) * 1000, who_var.get(), rid)
+    if isinstance(response, web.WebSocketResponse):
+        return response  # у WebSocket заголовки уже ушли
     response.headers.update(SECURITY_HEADERS)
+    response.headers["X-Request-Id"] = rid
     if api:
         response.headers["Cache-Control"] = "no-store"
     return response
@@ -1238,6 +1306,8 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_post("/api/logout", api_logout)
     r.add_get("/api/me", api_me)
     r.add_get("/api/overview", api_overview)
+    r.add_get("/api/metrics", api_metrics)
+    r.add_get("/api/live", api_live)
     r.add_post("/api/presence", api_presence)
     r.add_get("/api/badges", api_badges)
     r.add_get("/api/features", api_features)

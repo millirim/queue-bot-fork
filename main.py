@@ -10,6 +10,7 @@ import bottom
 import config
 import handlers
 import logsink
+import metrics
 import updater
 import web
 from common import BASE_COMMANDS, ActivityMiddleware, set_commands, set_menu_button, staff_kind
@@ -23,6 +24,7 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    metrics.install_log_feed()  # строки логов — ещё и в ленту «Live»
     logsink.install()  # те же логи — ещё и в базу, для панели админа
     if not config.BOT_TOKEN:
         raise SystemExit("Переменная окружения BOT_TOKEN не задана (токен от @BotFather).")
@@ -33,6 +35,7 @@ async def main() -> None:
     await db.connect()
     flusher = asyncio.create_task(logsink.flusher(db))
     update_watcher = None
+    collector = asyncio.create_task(metrics.collector(db))  # посекундные точки, нагрузка, сводка раз в минуту
     site = None
 
     bot = Bot(
@@ -42,6 +45,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp["db"] = db
     dp.update.outer_middleware(ActivityMiddleware(db))  # «был в сети» в боте
+    dp.update.outer_middleware(metrics.BotMetricsMiddleware(db))  # время обработки обновлений — в «Live»
     db.on_swap_ended = lambda kind, swap, who: handlers.swap_ended(bot, db, kind, swap, who)
     # Панель админа первой: в handlers последними стоят запасные обработчики, которые ловят всё подряд.
     dp.include_router(bottom.router)  # самым первым: нажатие нижней кнопки не должно попасть в ввод текста
@@ -67,6 +71,7 @@ async def main() -> None:
     finally:
         log.info("Бот остановлен")
         flusher.cancel()
+        collector.cancel()
         if update_watcher:
             update_watcher.cancel()
         if site:
