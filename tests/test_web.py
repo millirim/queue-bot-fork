@@ -279,6 +279,7 @@ def test_mini_app_login_checks_telegram_signature(tmp_path, monkeypatch):
             assert r.status == 403, "без заголовка защиты от CSRF — отказ"
         finally:
             await client.close()
+            await db.close()
     run(scenario())
 
 
@@ -349,6 +350,7 @@ def test_polls_in_web(tmp_path):
         finally:
             config.WEB_ROLES.discard("user")
             await client.close()
+            await db.close()
     run(scenario())
 
 
@@ -381,4 +383,5 @@ def test_swap_marks_and_admin_can_break_it_in_web(tmp_path):
             assert "swaps" not in await (await client.get(f"/api/queue/{subject.id}")).json()
         finally:
             await client.close()
+            await db.close()
     run(scenario())
