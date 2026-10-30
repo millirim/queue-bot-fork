@@ -52,7 +52,7 @@ DB = web.AppKey("db", Database)
 BOT = web.AppKey("bot", Bot)
 
 SECURITY_HEADERS = {
-    "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; "
                                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -250,6 +250,21 @@ async def api_me(request: web.Request) -> web.Response:
 
 # Правила очереди из ranking.RULES — строками без разметки (в вебе их рисует интерфейс).
 RULE_LINES = [html.unescape(re.sub(r"<[^>]+>", "", line)) for line in RULES.splitlines() if line.strip()]
+
+
+async def api_badges(request: web.Request) -> web.Response:
+    """Счётчики для меню: заявки и новые предложения (старостам), входящие обмены и неотвеченные голосования (себе)."""
+    v = await need(request)
+    db = db_of(request)
+    data = {"requests": 0, "suggestions": 0, "swaps": 0, "polls": 0}
+    if v.at_least("starosta"):
+        data["requests"] = len(await db.pending_requests()) + len(await db.pending_minus())
+        data["suggestions"] = await db.new_suggestions()
+    if v.student:
+        for s in await db.subjects():
+            data["swaps"] += sum(w.to_id == v.student.id for w in await db.pending_swaps(s.id, v.student.id))
+        data["polls"] = sum([not p.closed and await db.my_vote(p.id, v.student.id) is None for p in await db.polls()])
+    return web.json_response(data)
 
 
 # ================= обзор =================
@@ -1149,6 +1164,7 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_post("/api/logout", api_logout)
     r.add_get("/api/me", api_me)
     r.add_get("/api/overview", api_overview)
+    r.add_get("/api/badges", api_badges)
     r.add_get("/api/my", api_my)
     r.add_get("/api/subjects", api_subjects)
     r.add_post("/api/subjects", api_subject_add)
