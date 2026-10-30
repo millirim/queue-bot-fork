@@ -14,7 +14,8 @@ main() {
         logs)    journalctl -u queue-bot -f -n 50 ;;
         restart) need_root queue-bot restart
                  restart_and_check && say "Бот перезапущен ✓" || die "Бот не запустился: queue-bot logs" ;;
-        stop)    need_root queue-bot stop; systemctl stop queue-bot; say "Бот остановлен" ;;
+        stop)    need_root queue-bot stop; systemctl stop queue-bot; systemctl stop queue-bot-maint 2>/dev/null || true
+                 say "Бот остановлен (дежурный ответчик тоже: пока не запустишь, люди без ответа)" ;;
         start)   need_root queue-bot start; systemctl start queue-bot; say "Бот запущен" ;;
         backup)  need_root queue-bot backup; systemctl start queue-bot-backup.service
                  journalctl -u queue-bot-backup -n 1 -o cat --no-pager ;;

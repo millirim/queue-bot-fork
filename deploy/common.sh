@@ -4,7 +4,7 @@ CONF_DIR=/etc/queue-bot          # настройки (токен, админы)
 CONF="$CONF_DIR/env"
 DATA=/var/lib/queue-bot          # база и бэкапы — переживают обновления
 APP_USER=queuebot
-UNITS=(queue-bot.service queue-bot-backup.service queue-bot-backup.timer queue-bot-update.service queue-bot-update.path)
+UNITS=(queue-bot.service queue-bot-maint.service queue-bot-backup.service queue-bot-backup.timer queue-bot-update.service queue-bot-update.path)
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -24,6 +24,8 @@ apply_code() {
     systemctl daemon-reload
     # Кнопка «Обновить бота»: путь следит за файлом-запросом, который кладёт бот. Включение безопасно повторять.
     systemctl enable -q --now queue-bot-update.path || true
+    # Дежурный ответчик включается на загрузку, но не запускается сейчас (бот работает; дежурный стартует при остановке бота).
+    systemctl enable -q queue-bot-maint.service || true
     # Папка данных нужна боту сразу (запросы на обновление, версия), systemd создаёт её только при старте службы.
     install -d -m 750 -o "$APP_USER" -g "$APP_USER" "$DATA"
     write_version
