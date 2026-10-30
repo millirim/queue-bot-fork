@@ -8,13 +8,13 @@ from db import Database, parse_roster
 
 ROSTER = """№	Фамилия Имя Отчество
 1
-Антонович Антон Николаевич
+Андреев Артём Николаевич
 2
-Базык Серафим Олегович
+Беляев Степан Олегович
 3
-Будников Максим Алексеевич
+Буров Матвей Алексеевич
 26
-Трифонов Григорий Андреевич (отчислен с 04.09.2026)
+Тихонов Глеб Андреевич (отчислен с 04.09.2026)
 """
 
 
@@ -43,7 +43,7 @@ def _no_env_admins(monkeypatch):
 
 def test_parse_roster_skips_numbers_header_and_expelled():
     assert parse_roster(ROSTER) == [
-        "Антонович Антон Николаевич", "Базык Серафим Олегович", "Будников Максим Алексеевич",
+        "Андреев Артём Николаевич", "Беляев Степан Олегович", "Буров Матвей Алексеевич",
     ]
 
 
@@ -56,7 +56,7 @@ def test_roster_add_and_queue_has_everyone(tmp_path):
         assert (await db.add_students(names))[1] == names  # повторно не дублирует
         bd = await subject_id(db, "БД")
         # В очереди вся группа, даже кто не в боте; при равных 0 — по алфавиту.
-        assert [r.name.split()[0] for r in await db.queue(bd)] == ["Антонович", "Базык", "Будников"]
+        assert [r.name.split()[0] for r in await db.queue(bd)] == ["Андреев", "Беляев", "Буров"]
         await db.close()
     run(go())
 
@@ -64,17 +64,17 @@ def test_roster_add_and_queue_has_everyone(tmp_path):
 def test_request_link_and_conflicts(tmp_path):
     async def go():
         db = await make_db(tmp_path)
-        await db.add_students(["Антонович Антон Николаевич", "Базык Серафим Олегович"])
+        await db.add_students(["Андреев Артём Николаевич", "Беляев Степан Олегович"])
         s = await ids(db)
-        await db.create_request(10, "anton", s["Антонович"])
-        await db.create_request(11, "fake", s["Антонович"])  # кто-то пытается занять то же имя
+        await db.create_request(10, "anton", s["Андреев"])
+        await db.create_request(11, "fake", s["Андреев"])  # кто-то пытается занять то же имя
         assert len(await db.pending_requests()) == 2
         student = await db.approve(10)
-        assert student.chat_id == 10 and (await db.student_by_chat(10)).name.startswith("Антонович")
+        assert student.chat_id == 10 and (await db.student_by_chat(10)).name.startswith("Андреев")
         assert await db.approve(11) == "Это ФИО уже занято другим аккаунтом — заявка удалена"
         assert await db.get_request(11) is None
         assert await db.approve(11) == "Эту заявку уже рассмотрели"
-        assert [x.name.split()[0] for x in await db.free_students()] == ["Базык"]
+        assert [x.name.split()[0] for x in await db.free_students()] == ["Беляев"]
         assert await db.reject(12) is None
         await db.close()
     run(go())
@@ -445,7 +445,7 @@ def test_server_log_storage_filters_and_limit(tmp_path, monkeypatch):
 def test_polls_one_vote_per_person_and_closing(tmp_path):
     async def scenario():
         db = await make_db(tmp_path)
-        await db.add_students(["Антонов Антон Антонович", "Борисов Борис Борисович", "Ветров Виктор Викторович"])
+        await db.add_students(["Антонов Антон Андреев", "Борисов Борис Борисович", "Ветров Виктор Викторович"])
         a, b, c = [s.id for s in await db.students()]
         await db.link(11, "a", a); await db.link(12, "b", b)
         poll_id = await db.create_poll("Когда?", ["Пн", "Вт"], "админ Тест")
