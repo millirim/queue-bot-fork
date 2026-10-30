@@ -20,7 +20,7 @@ from aiogram.types import (
 import broadcast
 import config
 from common import (
-    MENU_BTN, bottom_for, btn, check_name, esc, feature_allowed, is_admin, is_creator, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
+    MENU_BTN, bottom_for, btn, check_name, esc, feature_allowed, presence_line, is_admin, is_creator, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed,
     web_role, works, POLL_MAX_OPTIONS, POLL_OPTION_LEN, poll_markup, poll_text,
 )
@@ -398,7 +398,11 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
     else:
         tg = "ещё не зашёл в бота"
     role = role_title(s)
-    text = (f"👤 <b>{esc(s.name)}</b>\n{tg}\nПодгруппа: <b>{s.subgroup or '—'}</b>\nРоль: {role}"
+    seen = ""
+    if s.linked and await feature_allowed(db, "presence", staff.chat_id, await db.student_by_chat(staff.chat_id)):
+        web_at, bot_at = (await db.activity()).get(s.chat_id, (None, None))
+        seen = f"\n{presence_line(web_at, bot_at)}"
+    text = (f"👤 <b>{esc(s.name)}</b>\n{tg}{seen}\nПодгруппа: <b>{s.subgroup or '—'}</b>\nРоль: {role}"
             + ("" if s.active else "\n🗂 <b>убран из группы</b>"))
     progress = []
     if s.active:

@@ -3,6 +3,7 @@ import logging
 import os
 import secrets
 import tempfile
+import time
 import zipfile
 import re
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ from ranking import Row, apply_swaps, draw_lot, order
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
+ONLINE_SECONDS = 60     # веб-панель шлёт сигнал раз в ~20 с, пока вкладка открыта; тише минуты — уже не онлайн
+TOUCH_EVERY = 20.0      # чаще этого в базу о человеке не пишем, секунд
 SWAP_ASK_HOURS = 24  # сколько живёт предложение обмена без ответа
 UNDO_SECONDS = 60  # сколько можно отменить своё «Сдал»
 LOG_KEEP = 5000    # сколько последних серверных логов хранить
@@ -138,6 +141,13 @@ CREATE TABLE IF NOT EXISTS swaps (
     created_at TEXT NOT NULL,               -- ISO, местное время
     ended_at   TEXT,                        -- когда закончился или отменён
     ended_by   INTEGER                      -- кто сдал и этим закончил обмен (для отмены «Сдал» в течение минуты)
+);
+
+-- Когда человек последний раз пользовался веб-панелью и ботом (для «онлайн» и «был в сети»).
+CREATE TABLE IF NOT EXISTS activity (
+    chat_id INTEGER PRIMARY KEY,
+    web_at  TEXT,                           -- ISO, местное время: последний сигнал веб-панели
+    bot_at  TEXT                            -- ISO, местное время: последнее действие в боте
 );
 
 -- Видимость дополнительных функций по ролям (features.py). Нет строки — значение по умолчанию из реестра.
@@ -354,6 +364,7 @@ class Database:
         # Вызывается, когда обмен закончился сам (не по кнопке участника): await hook(kind, swap, student_id),
         # kind — 'used' (кто-то сдал или поправили счётчик) или 'cancelled' (человека убрали из группы). Ставит main.py.
         self.on_swap_ended = None
+        self._touched: dict[tuple[int, str], float] = {}
 
     async def connect(self) -> None:
         folder = os.path.dirname(self.path)
@@ -526,6 +537,24 @@ class Database:
         """Telegram всех из группы, кто есть в боте."""
         return [s.chat_id for s in await self.students() if s.linked]
 
+    # --- онлайн и «был в сети» ---
+    async def touch(self, chat_id: int, kind: str) -> None:
+        """Отмечает, что человек сейчас в вебе ('web') или в боте ('bot'). Пишет в базу не чаще раза в TOUCH_EVERY секунд."""
+        assert kind in ("web", "bot")
+        now = time.monotonic()
+        if now - self._touched.get((chat_id, kind), -1e9) < TOUCH_EVERY:
+            return
+        self._touched[(chat_id, kind)] = now
+        stamp = local_now().isoformat(timespec="seconds")
+        await self._write(
+            f"INSERT INTO activity (chat_id, {kind}_at) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET {kind}_at = excluded.{kind}_at",
+            (chat_id, stamp))
+
+    async def activity(self) -> dict[int, tuple[datetime | None, datetime | None]]:
+        """chat_id → (последний раз в вебе, последний раз в боте)."""
+        parse = lambda t: datetime.fromisoformat(t) if t else None  # noqa: E731
+        return {r["chat_id"]: (parse(r["web_at"]), parse(r["bot_at"])) for r in await self._all("SELECT * FROM activity")}
+
     # --- видимость функций ---
     async def feature_flags(self) -> dict[tuple[str, str], bool]:
         rows = await self._all("SELECT feature, role, enabled FROM feature_flags")
@@ -534,7 +563,7 @@ class Database:
     async def feature_on(self, feature: str, role: str) -> bool:
         """Включена ли функция для роли ('user', 'starosta', 'admin'); создателя проверяет вызывающий."""
         row = await self._one("SELECT enabled FROM feature_flags WHERE feature = ? AND role = ?", (feature, role))
-        return bool(row["enabled"]) if row else FEATURES[feature].default
+        return bool(row["enabled"]) if row else role in FEATURES[feature].roles
 
     async def set_feature(self, feature: str, role: str, enabled: bool) -> None:
         assert feature in FEATURES and role in ROLES_FOR_FEATURES

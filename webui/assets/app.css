@@ -649,3 +649,6 @@ html.tg .status { padding-bottom: env(safe-area-inset-bottom); height: calc(var(
 @keyframes nick-flow { to { background-position: 0 0, 300% 0; } }
 @media (prefers-reduced-motion: reduce) { .nick-creator { animation: none; } }
 .nick-creator { white-space: nowrap; }
+
+/* «Кто онлайн» */
+.online-dot { display: inline-block; width: 8px; height: 8px; margin-left: 8px; border-radius: 50%; background: var(--ok); vertical-align: middle; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }

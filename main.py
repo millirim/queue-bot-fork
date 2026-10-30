@@ -12,7 +12,7 @@ import handlers
 import logsink
 import updater
 import web
-from common import BASE_COMMANDS, set_commands, set_menu_button, staff_kind
+from common import BASE_COMMANDS, ActivityMiddleware, set_commands, set_menu_button, staff_kind
 from db import Database
 
 log = logging.getLogger("queue-bot")
@@ -41,6 +41,7 @@ async def main() -> None:
     )
     dp = Dispatcher()
     dp["db"] = db
+    dp.update.outer_middleware(ActivityMiddleware(db))  # «был в сети» в боте
     db.on_swap_ended = lambda kind, swap, who: handlers.swap_ended(bot, db, kind, swap, who)
     # Панель админа первой: в handlers последними стоят запасные обработчики, которые ловят всё подряд.
     dp.include_router(bottom.router)  # самым первым: нажатие нижней кнопки не должно попасть в ввод текста

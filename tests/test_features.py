@@ -99,7 +99,7 @@ def test_web_respects_flags(tmp_path):
                 assert (await client.post("/api/login", json={"token": token}, headers=H)).status == 200
             await login(STUDENT)
             me = await (await client.get("/api/me")).json()
-            assert me["features"] == {"swap": True, "polls": True, "suggestions": True}
+            assert me["features"] == {"swap": True, "polls": True, "presence": False, "suggestions": True}, "«Кто онлайн» у студентов выключен по умолчанию"
             assert (await client.get("/api/features")).status == 403, "настройки видны только админу"
             await login(ADMIN)
             r = await client.post("/api/features", json={"feature": "polls", "role": "user", "enabled": False}, headers=H)

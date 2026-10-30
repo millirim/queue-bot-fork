@@ -93,6 +93,8 @@ class Harness:
         import handlers
         dp = Dispatcher()
         dp["db"] = db
+        from common import ActivityMiddleware
+        dp.update.outer_middleware(ActivityMiddleware(db))
         db.on_swap_ended = lambda kind, swap, who: handlers.swap_ended(self.bot, db, kind, swap, who)
         for router in (bottom.router, admin.router, handlers.router):
             router._parent_router = None  # роутер можно подключить только к одному диспетчеру, а сценариев несколько
