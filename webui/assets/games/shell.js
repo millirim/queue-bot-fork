@@ -110,7 +110,7 @@
     };
 
     const showRoom = () => {
-      const r = room, def = registry[r.kind];
+      const r = room.room, def = registry[r.kind];
       if (mode !== "room" || !destroyGame) {
         mode = "room"; cleanupGame();
         const root = h("div", { class: `games-play games-${r.kind}` });
