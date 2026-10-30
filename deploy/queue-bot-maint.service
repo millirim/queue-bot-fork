@@ -1,0 +1,25 @@
+[Unit]
+Description=Дежурный ответчик: «подождите», пока бот перезапускается
+After=network-online.target
+Wants=network-online.target
+# При загрузке сервера — раньше бота; дальше основной бот сам забирает обновления у Telegram (дежурный видит 409 и уходит).
+Before=queue-bot.service
+
+[Service]
+User=queuebot
+Group=queuebot
+# Только стандартная библиотека: работает, даже если окружение бота сломано. Токен — из тех же настроек.
+ExecStart=/usr/bin/python3 -I /opt/queue-bot/deploy/maintenance.py
+EnvironmentFile=/etc/queue-bot/env
+Environment=PYTHONUNBUFFERED=1
+# Сам не перезапускается: его запускает остановка основного бота (ExecStopPost в queue-bot.service) и загрузка системы.
+Restart=no
+TimeoutStopSec=10
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

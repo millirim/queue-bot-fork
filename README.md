@@ -179,7 +179,7 @@ sudo bash ~/queue-bot/deploy/install.sh
 | обновить из GitHub | `sudo queue-bot update` |
 | работает ли и какая версия | `queue-bot status` |
 | логи в реальном времени (выход — Ctrl+C) | `queue-bot logs` |
-| перезапуск / стоп / старт | `sudo queue-bot restart` · `stop` · `start` |
+| перезапуск / стоп / старт | `sudo queue-bot restart` · `stop` · `start` (пока бот перезапускается, дежурный отвечает людям «подожди пару минут») |
 | бэкап сейчас | `sudo queue-bot backup` |
 | обновить кнопкой | в боте: `Панель Админа → 🔄 Обновить бота` |
 | изменить токен или админов | `sudo queue-bot config` |

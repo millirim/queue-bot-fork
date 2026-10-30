@@ -13,6 +13,10 @@ StateDirectory=queue-bot
 StateDirectoryMode=0750
 Environment=DB_PATH=/var/lib/queue-bot/queue.db PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/queue-bot/env
+# Остановился (перезапуск, обновление, падение) — на это время дежурный отвечает «подождите» (deploy/maintenance.py).
+# «+» — выполнить с правами root вне песочницы, «-» — сбой не мешает остановке. Когда бот снова опрашивает Telegram,
+# дежурный получает 409 и сам уходит.
+ExecStopPost=-+/bin/systemctl start --no-block queue-bot-maint.service
 # Упал или пропал интернет — перезапуск через 10 секунд.
 Restart=always
 RestartSec=10
