@@ -14,8 +14,8 @@ def test_wrapped_fits_width_and_keeps_indent():
 
 
 def test_audit_entry_format():
-    lines = admin.audit_lines(AuditRecord(T, "админ Антонович Антон Николаевич", "заявка принята: @u → Базык"))
-    assert lines == ["12:50:03 адм Антонович А.Н.", "  заявка принята: @u → Базык"]
+    lines = admin.audit_lines(AuditRecord(T, "админ Андреев Артём Николаевич", "заявка принята: @u → Беляев"))
+    assert lines == ["12:50:03 адм Андреев А.Н.", "  заявка принята: @u → Беляев"]
 
 
 def test_server_entry_format_with_traceback_tail():

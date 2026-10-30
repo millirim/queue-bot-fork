@@ -87,11 +87,11 @@
 
 | Обзор · светлая | Очередь · тёмная |
 |---|---|
-| ![Обзор](docs/web/overview-light.png) | ![Очередь в тёмной теме](docs/web/queue-dark.png) |
+| ![Обзор](docs/screens/overview-light.png) | ![Очередь в тёмной теме](docs/screens/queue-dark.png) |
 | **Предложения** | **Рассылка с форматированием · AMOLED** |
-| ![Предложения](docs/web/suggestions-light.png) | ![Рассылка](docs/web/broadcast-amoled.png) |
+| ![Предложения](docs/screens/suggestions-light.png) | ![Рассылка](docs/screens/broadcast-amoled.png) |
 | **Карточка человека** | **Телефон: очередь студента · пинг и время сервера** |
-| ![Карточка человека](docs/web/person-light.png) | ![Телефон](docs/web/mobile-student-queue.png) ![Пинг на телефоне](docs/web/mobile-ping-dark.png) |
+| ![Карточка человека](docs/screens/person-light.png) | ![Телефон](docs/screens/mobile-student-queue.png) ![Пинг на телефоне](docs/screens/mobile-ping-dark.png) |
 
 **Входить могут все из списка группы** (`WEB_ROLES=admin,starosta,user`). Каждый видит своё; админ может посмотреть
 панель глазами старосты или студента переключателем сверху (права только понижаются, проверяет сервер). Закрыть веб

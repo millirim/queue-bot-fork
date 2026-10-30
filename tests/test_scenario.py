@@ -14,15 +14,15 @@ from harness import Harness
 
 ROSTER = """№	Фамилия Имя Отчество
 1
-Антонович Антон Николаевич
+Андреев Артём Николаевич
 2
-Базык Серафим Олегович
+Беляев Степан Олегович
 3
-Будников Максим Алексеевич
+Буров Матвей Алексеевич
 26
-Трифонов Григорий Андреевич (отчислен с 04.09.2026)
+Тихонов Глеб Андреевич (отчислен с 04.09.2026)
 27
-Хвиневич Тимур Максимович"""
+Хромов Тарас Максимович"""
 
 
 def check(cond, what):
@@ -60,91 +60,91 @@ async def scenario(tmp_path):
     await press(dp, 900, "ap"); await press(dp, 900, "apa"); await text(dp, 900, ROSTER)
     check(any("Добавлено: 4" in s[1] for s in session.sent if s[0] == 900), "загрузка списка: 4 человека")
     names = [s.name for s in await db.students()]
-    check("Трифонов Григорий Андреевич" not in " ".join(names) and len(names) == 4, "отчисленный и заголовок пропущены")
+    check("Тихонов Глеб Андреевич" not in " ".join(names) and len(names) == 4, "отчисленный и заголовок пропущены")
     bd = next(s.id for s in await db.subjects() if s.name == "БД")
     check(len(await db.queue(bd)) == 4, "в очереди вся группа, хотя никто ещё не в боте")
 
     ids = {s.name.split()[0]: s.id for s in await db.students()}
     # Студент выбирает себя
     await text(dp, 1, "/start")
-    check(f"rg:{ids['Антонович']}" in buttons(1), "студент видит список имён")
-    await press(dp, 1, f"rg:{ids['Антонович']}"); await press(dp, 1, f"rgok:{ids['Антонович']}")
+    check(f"rg:{ids['Андреев']}" in buttons(1), "студент видит список имён")
+    await press(dp, 1, f"rg:{ids['Андреев']}"); await press(dp, 1, f"rgok:{ids['Андреев']}")
     check("Заявка отправлена" in last(1)[1], "заявка отправлена")
-    check(any(s[0] == 900 and "Новая заявка" in s[1] and "Антонович" in s[1] for s in session.sent), "админу пришла заявка")
+    check(any(s[0] == 900 and "Новая заявка" in s[1] and "Андреев" in s[1] for s in session.sent), "админу пришла заявка")
     # Кто-то пытается занять то же имя
-    await text(dp, 2, "/start"); await press(dp, 2, f"rgok:{ids['Антонович']}")
+    await text(dp, 2, "/start"); await press(dp, 2, f"rgok:{ids['Андреев']}")
     await press(dp, 900, "rq:ok:1")
     check("Заявку приняли" in last(1)[1], "заявка принята")
     await press(dp, 900, "rq:ok:2")
     check("уже занято" in session.alerts[-1] and "уже занято" in last(2)[1], "второй аккаунт на то же имя не проходит")
     await text(dp, 2, "/start")
-    check(f"rg:{ids['Антонович']}" not in buttons(2), "занятое имя пропало из выбора")
-    await press(dp, 2, f"rgok:{ids['Базык']}"); await press(dp, 900, "rq:ok:2")
+    check(f"rg:{ids['Андреев']}" not in buttons(2), "занятое имя пропало из выбора")
+    await press(dp, 2, f"rgok:{ids['Беляев']}"); await press(dp, 900, "rq:ok:2")
 
     # Живая очередь
     await press(dp, 1, f"s:{bd}")
     q = last(1)[1]
-    check("Будников" in q and "Хвиневич" in q and "это ты" in q, "в очереди вся группа, я отмечен")
+    check("Буров" in q and "Хромов" in q and "это ты" in q, "в очереди вся группа, я отмечен")
     await press(dp, 2, f"sd:{bd}:1"); await press(dp, 2, f"sw:{bd}:1"); await press(dp, 1, f"sw:{bd}:1")
-    check([r.student_id for r in await db.queue(bd)][:2] == [ids["Антонович"], ids["Базык"]], "желающие сверху, меньше сдано — раньше")
+    check([r.student_id for r in await db.queue(bd)][:2] == [ids["Андреев"], ids["Беляев"]], "желающие сверху, меньше сдано — раньше")
 
     # Староста отмечает того, кого нет в боте
-    await press(dp, 900, f"au:{ids['Антонович']}")
-    check(f"aur:{ids['Антонович']}:admin" in buttons(900), "в карточке — выбор роли")
-    await press(dp, 900, f"aur:{ids['Антонович']}:starosta")
+    await press(dp, 900, f"au:{ids['Андреев']}")
+    check(f"aur:{ids['Андреев']}:admin" in buttons(900), "в карточке — выбор роли")
+    await press(dp, 900, f"aur:{ids['Андреев']}:starosta")
     check("роль теперь — <b>староста</b>" in last(1)[1], "назначение старосты")
-    await press(dp, 1, f"aqw:{bd}:{ids['Хвиневич']}"); await press(dp, 1, f"aqd:{bd}:{ids['Хвиневич']}:1")
-    row = (await db.get_row(bd, ids["Хвиневич"]))[1]
+    await press(dp, 1, f"aqw:{bd}:{ids['Хромов']}"); await press(dp, 1, f"aqd:{bd}:{ids['Хромов']}:1")
+    row = (await db.get_row(bd, ids["Хромов"]))[1]
     check(row.done == 1 and not row.wants, "староста отметил 🙋 и +1 человеку без бота")
     await press(dp, 1, "apa"); check("только для админов" in session.alerts[-1], "староста не меняет список")
 
     # Админ: убрать из группы и вернуть, отвязать Telegram
-    await press(dp, 900, f"auxok:{ids['Будников']}")
-    check(ids["Будников"] not in [r.student_id for r in await db.queue(bd)], "убранный пропал из очереди")
-    await press(dp, 900, "api"); check(f"au:{ids['Будников']}" in buttons(900), "он в «Убранных»")
-    await press(dp, 900, f"auv:{ids['Будников']}"); check(len(await db.queue(bd)) == 4, "вернули в группу")
-    await press(dp, 900, f"aulok:{ids['Базык']}")
+    await press(dp, 900, f"auxok:{ids['Буров']}")
+    check(ids["Буров"] not in [r.student_id for r in await db.queue(bd)], "убранный пропал из очереди")
+    await press(dp, 900, "api"); check(f"au:{ids['Буров']}" in buttons(900), "он в «Убранных»")
+    await press(dp, 900, f"auv:{ids['Буров']}"); check(len(await db.queue(bd)) == 4, "вернули в группу")
+    await press(dp, 900, f"aulok:{ids['Беляев']}")
     check("отвязан" in last(2)[1], "отвязка Telegram")
-    await text(dp, 2, "/start"); check(f"rg:{ids['Базык']}" in buttons(2), "имя снова свободно")
+    await text(dp, 2, "/start"); check(f"rg:{ids['Беляев']}" in buttons(2), "имя снова свободно")
 
     # Админ правит сданные прямо из карточки человека
-    await press(dp, 900, f"au:{ids['Хвиневич']}")
-    check(f"aqe:{bd}:{ids['Хвиневич']}:p" in buttons(900), "в карточке человека — кнопки предметов")
-    await press(dp, 900, f"aqe:{bd}:{ids['Хвиневич']}:p"); await press(dp, 900, f"aqd:{bd}:{ids['Хвиневич']}:1:p")
-    check((await db.get_row(bd, ids["Хвиневич"]))[1].done == 2, "➕1 из карточки человека")
-    check(f"au:{ids['Хвиневич']}" in buttons(900), "«назад» ведёт к человеку")
-    await press(dp, 900, f"aqw:{bd}:{ids['Хвиневич']}:p")
-    check((await db.get_row(bd, ids["Хвиневич"]))[1].wants and f"au:{ids['Хвиневич']}" in buttons(900), "🙋 из карточки")
-    await press(dp, 900, f"au:{ids['Хвиневич']}"); check(any("БД: 2/6 🙋" in l for l in labels(900)), "в карточке видно 2/6 🙋")
+    await press(dp, 900, f"au:{ids['Хромов']}")
+    check(f"aqe:{bd}:{ids['Хромов']}:p" in buttons(900), "в карточке человека — кнопки предметов")
+    await press(dp, 900, f"aqe:{bd}:{ids['Хромов']}:p"); await press(dp, 900, f"aqd:{bd}:{ids['Хромов']}:1:p")
+    check((await db.get_row(bd, ids["Хромов"]))[1].done == 2, "➕1 из карточки человека")
+    check(f"au:{ids['Хромов']}" in buttons(900), "«назад» ведёт к человеку")
+    await press(dp, 900, f"aqw:{bd}:{ids['Хромов']}:p")
+    check((await db.get_row(bd, ids["Хромов"]))[1].wants and f"au:{ids['Хромов']}" in buttons(900), "🙋 из карточки")
+    await press(dp, 900, f"au:{ids['Хромов']}"); check(any("БД: 2/6 🙋" in l for l in labels(900)), "в карточке видно 2/6 🙋")
 
     # Админ назначает админа, новый админ может всё, включая роли
     await press(dp, 1, "as"); check("только для админов" in session.alerts[-1], "староста — не админ")
-    await press(dp, 900, f"aur:{ids['Антонович']}:admin")
+    await press(dp, 900, f"aur:{ids['Андреев']}:admin")
     check("роль теперь — <b>админ</b>" in last(1)[1], "назначение админа")
     await press(dp, 1, "as"); check("Предметы" in last(1)[1], "новый админ видит предметы")
-    await text(dp, 2, "/start"); await press(dp, 2, f"rgok:{ids['Базык']}")
+    await text(dp, 2, "/start"); await press(dp, 2, f"rgok:{ids['Беляев']}")
     check(any(s[0] == 1 and "Новая заявка" in s[1] for s in session.sent), "новому админу приходят заявки")
     await press(dp, 1, "rq:ok:2")
-    await press(dp, 1, f"aur:{ids['Базык']}:starosta")
+    await press(dp, 1, f"aur:{ids['Беляев']}:starosta")
     check("роль теперь — <b>староста</b>" in last(2)[1], "новый админ назначает старост")
-    await press(dp, 1, f"aur:{ids['Базык']}:admin"); await press(dp, 2, "as")
+    await press(dp, 1, f"aur:{ids['Беляев']}:admin"); await press(dp, 2, "as")
     check("Предметы" in last(2)[1], "новый админ назначает админов")
     # Создателя из настроек снять нельзя
-    await text(dp, 900, "/start"); await press(dp, 900, f"rgok:{ids['Хвиневич']}")
-    await press(dp, 1, f"au:{ids['Хвиневич']}")
+    await text(dp, 900, "/start"); await press(dp, 900, f"rgok:{ids['Хромов']}")
+    await press(dp, 1, f"au:{ids['Хромов']}")
     check(not any(b.startswith("aur:") for b in buttons(1)), "у создателя нет кнопок роли")
-    await press(dp, 1, f"aur:{ids['Хвиневич']}:user")
+    await press(dp, 1, f"aur:{ids['Хромов']}:user")
     check("создатель" in session.alerts[-1], "создателя не снять")
     # Снятый админ теряет доступ
-    await press(dp, 1, f"aur:{ids['Базык']}:user"); await press(dp, 2, "adm")
+    await press(dp, 1, f"aur:{ids['Беляев']}:user"); await press(dp, 2, "adm")
     check("только для старост" in session.alerts[-1], "снятый админ теряет доступ")
 
     # Роль заранее — человек ещё не в боте
-    await press(dp, 900, f"au:{ids['Будников']}")
-    check(f"aur:{ids['Будников']}:starosta" in buttons(900), "кнопки роли есть у того, кто не в боте")
-    await press(dp, 900, f"aur:{ids['Будников']}:starosta")
+    await press(dp, 900, f"au:{ids['Буров']}")
+    check(f"aur:{ids['Буров']}:starosta" in buttons(900), "кнопки роли есть у того, кто не в боте")
+    await press(dp, 900, f"aur:{ids['Буров']}:starosta")
     check("получит, когда зарегистрируется" in last(900)[1], "в карточке: роль назначена заранее")
-    await text(dp, 7, "/start"); await press(dp, 7, f"rgok:{ids['Будников']}")
+    await text(dp, 7, "/start"); await press(dp, 7, f"rgok:{ids['Буров']}")
     check(any("роль старосты" in s[1] for s in session.sent if s[0] == 900), "проверяющего предупредили о роли")
     await press(dp, 900, "rq:ok:7")
     check("Твоя роль — <b>староста</b>" in last(7)[1], "при принятии сразу сообщили роль")
@@ -185,22 +185,22 @@ async def scenario(tmp_path):
 
     # Подгруппы: загрузка списком и фильтр
     await press(dp, 900, "apg"); await press(dp, 900, "apgl:1")
-    await text(dp, 900, "1\nАнтонович Антон Николаевич\n2\nБазык Серафим Олегович\nНеизвестный Человек Иванович")
+    await text(dp, 900, "1\nАндреев Артём Николаевич\n2\nБеляев Степан Олегович\nНеизвестный Человек Иванович")
     check(any("отмечено 2" in s[1] and "Неизвестный" in s[1] for s in session.sent if s[0] == 900), "подгруппа списком + кто не найден")
-    await press(dp, 900, f"aus:{ids['Будников']}:2")
-    check((await db.get_student(ids["Будников"])).subgroup == 2, "подгруппа в карточке")
+    await press(dp, 900, f"aus:{ids['Буров']}:2")
+    check((await db.get_student(ids["Буров"])).subgroup == 2, "подгруппа в карточке")
     await press(dp, 1, f"s:{bd}")
     check(f"sf:{bd}:1" in buttons(1), "в очереди кнопки «Все / 1 / 2»")
     await press(dp, 1, f"sf:{bd}:1"); q = last(1)[1]
-    check("1 подгруппа" in q and "Антонович" in q and "Базык" in q and "Будников" not in q, "фильтр 1 подгруппы")
+    check("1 подгруппа" in q and "Андреев" in q and "Беляев" in q and "Буров" not in q, "фильтр 1 подгруппы")
     await press(dp, 1, f"sf:{bd}:2"); q = last(1)[1]
-    check("Будников" in q and "Антонович" not in q, "фильтр 2 подгруппы")
-    await press(dp, 1, f"sf:{bd}:0"); check("Будников" in last(1)[1] and "Антонович" in last(1)[1], "«Все» — снова все")
+    check("Буров" in q and "Андреев" not in q, "фильтр 2 подгруппы")
+    await press(dp, 1, f"sf:{bd}:0"); check("Буров" in last(1)[1] and "Андреев" in last(1)[1], "«Все» — снова все")
     await press(dp, 900, f"aqs:{bd}"); await press(dp, 900, f"aqf:{bd}:2")
-    check("Будников" in last(900)[1] and "Антонович" not in last(900)[1], "фильтр и в админке")
+    check("Буров" in last(900)[1] and "Андреев" not in last(900)[1], "фильтр и в админке")
 
     # «Сдал» → «Отменить» в течение минуты
-    bz = ids["Базык"]
+    bz = ids["Беляев"]
     before = (await db.get_row(bd, bz))[1]
     await press(dp, 2, f"sw:{bd}:1"); await press(dp, 2, f"sd:{bd}:1")
     check(f"su:{bd}" in buttons(2) and f"sm:{bd}" not in buttons(2), "после «Сдал» — кнопка «Отменить»")
@@ -222,7 +222,7 @@ async def scenario(tmp_path):
           "у остальных проверяющих кнопки пропали")
 
     # Староста не решает свою заявку и не ставит себе −1 напрямую
-    bud = ids["Будников"]
+    bud = ids["Буров"]
     await press(dp, 900, f"aqd:{bd}:{bud}:1")
     await press(dp, 7, f"sm:{bd}"); await text(dp, 7, "Себе хочу минус")
     own = next(m.id for m in await db.pending_minus() if m.student.id == bud)
@@ -354,7 +354,7 @@ async def scenario(tmp_path):
 
     await press(dp, 1, "aj")
     allj = " | ".join(r.text for r in await db.journal(500))
-    check("заявка принята" in allj and "добавлены в список" in allj and "роль Базык" in allj, "журнал действий полный")
+    check("заявка принята" in allj and "добавлены в список" in allj and "роль Беляев" in allj, "журнал действий полный")
     check("<b>" not in allj and "&lt;" not in allj, "в журнале нет разметки Telegram")
     # ===== голосования =====
     await press(dp, 900, "adm"); check("av" in buttons(900), "у админа в панели есть «Голосования»")
