@@ -70,7 +70,7 @@ migrate_old_layout() {
     [[ -f "$CODE/.env" && ! -f "$CONF" ]] || return 0
     say "Переношу настройки из старой установки в $CONF"
     install -d -m 700 "$CONF_DIR"
-    grep -E '^(BOT_TOKEN|ADMIN_IDS|TIMEZONE)=' "$CODE/.env" > "$CONF" || true
+    grep -E '^(BOT_TOKEN|ADMIN_IDS|CREATOR_IDS|TIMEZONE)=' "$CODE/.env" > "$CONF" || true
     chmod 600 "$CONF"
     systemctl stop queue-bot.service 2>/dev/null || true
     rm -rf "$CODE"  # база старой версии несовместима, код скачаем заново
@@ -98,7 +98,7 @@ configure() {
         echo "✗ Нужны только цифры, например 123456789"
     done
     install -d -m 700 "$CONF_DIR"
-    (umask 077; printf 'BOT_TOKEN=%s\nADMIN_IDS=%s\nTIMEZONE=Europe/Minsk\n' "$token" "$admins" > "$CONF")
+    (umask 077; printf 'BOT_TOKEN=%s\nCREATOR_IDS=%s\nTIMEZONE=Europe/Minsk\n' "$token" "$admins" > "$CONF")
 }
 
 main "$@"

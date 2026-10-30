@@ -10,7 +10,7 @@ import web
 from db import Database
 from harness import Harness
 
-OWNER = 1          # главный админ из ADMIN_IDS
+OWNER = 1          # создатель из CREATOR_IDS
 STAROSTA = 7
 STUDENT = 8
 H = {"X-Queue-Bot": "1"}
@@ -18,7 +18,7 @@ H = {"X-Queue-Bot": "1"}
 
 @pytest.fixture(autouse=True)
 def _settings(monkeypatch):
-    monkeypatch.setattr(config, "ADMIN_IDS", {OWNER})
+    monkeypatch.setattr(config, "CREATOR_IDS", {OWNER})
     monkeypatch.setattr(config, "WEB_PORT", 8080)
     monkeypatch.setattr(config, "WEB_ROLES", {"admin"})
     monkeypatch.setattr(config, "WEB_URL", "http://127.0.0.1:8080")
@@ -60,7 +60,7 @@ def test_login_link_is_one_time_and_gives_a_session(tmp_path):
             cookie = r.cookies[web.COOKIE]
             assert cookie["httponly"] and cookie["samesite"] == "Strict", "cookie сессии закрыта от JS и чужих сайтов"
             me = await (await client.get("/api/me")).json()
-            assert me["role"] == "admin" and me["owner"] and me["views"] == ["admin", "starosta", "user"]
+            assert me["role"] == "admin" and me["creator"] and me["views"] == ["admin", "starosta", "user"]
             client.session.cookie_jar.clear()
             again = await client.post("/api/login", json={"token": token}, headers=H)
             assert again.status == 401, "ссылка одноразовая"

@@ -21,14 +21,14 @@ log = logging.getLogger(__name__)
 
 
 # --- права ---
-def is_owner(chat_id: int) -> bool:
-    """Главный админ — из ADMIN_IDS в настройках сервера. Его нельзя снять из бота."""
-    return chat_id in config.ADMIN_IDS
+def is_creator(chat_id: int) -> bool:
+    """Создатель — из CREATOR_IDS (раньше ADMIN_IDS) в настройках сервера. Его нельзя снять из бота."""
+    return chat_id in config.CREATOR_IDS
 
 
 def is_admin(chat_id: int, student: Student | None = None) -> bool:
-    """Главный админ или админ, назначенный в боте."""
-    return is_owner(chat_id) or bool(student and student.admin)
+    """Создатель или админ, назначенный в боте."""
+    return is_creator(chat_id) or bool(student and student.admin)
 
 
 def is_staff(chat_id: int, student: Student | None) -> bool:
@@ -72,6 +72,14 @@ if web_allowed("user"):
 def panel_name(kind: str | None) -> str:
     """Как называется панель: у админов — «Панель Админа», у старост — «Панель старосты»."""
     return "Панель Админа" if kind == "admin" else "Панель старосты"
+
+
+async def feature_allowed(db: Database, feature: str, chat_id: int, student: Student | None) -> bool:
+    """Включена ли дополнительная функция (features.py) для этого человека. Создатель — всегда."""
+    if is_creator(chat_id):
+        return True
+    role = "admin" if is_admin(chat_id, student) else "starosta" if student and student.starosta else "user"
+    return await db.feature_on(feature, role)
 
 
 def staff_kind(chat_id: int, student: Student | None) -> str | None:

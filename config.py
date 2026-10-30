@@ -7,9 +7,10 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Telegram ID админов через запятую. Админ может всё; старост назначает админ в боте.
+# Telegram ID создателей через запятую (раньше — «главные админы», переменная ADMIN_IDS по-прежнему читается).
+# Создатель может всё, как админ, и его нельзя снять из бота; админов и старост назначают в боте.
 # Если список пустой, заявки на регистрацию принимаются автоматически.
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
+CREATOR_IDS = {int(x) for name in ("CREATOR_IDS", "ADMIN_IDS") for x in os.getenv(name, "").replace(" ", "").split(",") if x}
 
 # Путь к SQLite (относительно папки бота или абсолютный).
 DB_PATH = os.getenv("DB_PATH", "data/queue.db")

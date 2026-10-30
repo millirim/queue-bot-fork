@@ -30,7 +30,7 @@ def check(cond, what):
 
 
 def test_full_scenario(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "ADMIN_IDS", {900})
+    monkeypatch.setattr(config, "CREATOR_IDS", {900})
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "state" / "q.db"))  # сюда updater кладёт запросы
     (tmp_path / "state").mkdir()
     monkeypatch.setattr(updater, "UNIT", tmp_path / "queue-bot-update.path")
@@ -129,12 +129,12 @@ async def scenario(tmp_path):
     check("роль теперь — <b>староста</b>" in last(2)[1], "новый админ назначает старост")
     await press(dp, 1, f"aur:{ids['Базык']}:admin"); await press(dp, 2, "as")
     check("Предметы" in last(2)[1], "новый админ назначает админов")
-    # Главного админа из настроек снять нельзя
+    # Создателя из настроек снять нельзя
     await text(dp, 900, "/start"); await press(dp, 900, f"rgok:{ids['Хвиневич']}")
     await press(dp, 1, f"au:{ids['Хвиневич']}")
-    check(not any(b.startswith("aur:") for b in buttons(1)), "у главного админа нет кнопок роли")
+    check(not any(b.startswith("aur:") for b in buttons(1)), "у создателя нет кнопок роли")
     await press(dp, 1, f"aur:{ids['Хвиневич']}:user")
-    check("главный админ" in session.alerts[-1], "главного админа не снять")
+    check("создатель" in session.alerts[-1], "создателя не снять")
     # Снятый админ теряет доступ
     await press(dp, 1, f"aur:{ids['Базык']}:user"); await press(dp, 2, "adm")
     check("только для старост" in session.alerts[-1], "снятый админ теряет доступ")
@@ -172,7 +172,7 @@ async def scenario(tmp_path):
     nid = next(x.id for x in await db.students() if x.name.startswith("Новиков"))
     await text(dp, 8, "/start"); await press(dp, 8, f"rgok:{nid}")
     got = {s[0] for s in session.sent if "Новая заявка" in s[1] and "Новиков" in s[1]}
-    check({900, 1, 7} <= got, "заявку получили все: главный админ, админ, староста")
+    check({900, 1, 7} <= got, "заявку получили все: создатель, админ, староста")
     await press(dp, 7, "rq:ok:8")
     closed = {e[0] for e in session.edits if "Новиков" in e[2] and "принята" in e[2] and e[3] is None}
     check({900, 1} <= closed, "у остальных сообщение стало «принята», кнопок нет")

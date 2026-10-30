@@ -26,8 +26,8 @@ async def main() -> None:
     logsink.install()  # те же логи — ещё и в базу, для панели админа
     if not config.BOT_TOKEN:
         raise SystemExit("Переменная окружения BOT_TOKEN не задана (токен от @BotFather).")
-    if not config.ADMIN_IDS:
-        log.warning("ADMIN_IDS не задан: заявки на регистрацию принимаются автоматически, панели админа нет")
+    if not config.CREATOR_IDS:
+        log.warning("CREATOR_IDS не задан: заявки на регистрацию принимаются автоматически, панели админа нет")
 
     db = Database(config.DB_PATH)
     await db.connect()
@@ -50,7 +50,7 @@ async def main() -> None:
     # У всех — обычные команды; у старост добавляется /moderator, у админов — /admin.
     await bot.set_my_commands(BASE_COMMANDS)
     await set_menu_button(bot, None, None)  # общая кнопка «Панель», если веб открыт студентам и есть https
-    for chat_id in config.ADMIN_IDS:
+    for chat_id in config.CREATOR_IDS:
         await set_commands(bot, chat_id, "admin")
     for student in await db.students():
         if student.linked and (kind := staff_kind(student.chat_id, student)):

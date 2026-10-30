@@ -33,8 +33,9 @@ from admin import (
     notify, notify_minus, publish_poll, remind_poll, remove_poll, finish_poll, clean_poll_options, request_plain, request_text,
     valid_emoji,
 )
+from features import FEATURES, ROLE_TITLES
 from common import (
-    POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_owner, kb, send, send_many, set_commands, short_name,
+    POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_creator, kb, send, send_many, set_commands, short_name,
     staff_kind, web_allowed, web_role,
 )
 from db import ROLES, SUGGESTION_STATUSES, Database, Student, local_now, parse_roster
@@ -70,7 +71,7 @@ class Fail(Exception):
 
 @dataclass
 class Viewer:
-    """Кто смотрит: chat_id, человек из списка (может не быть у главного админа), настоящая роль и роль просмотра."""
+    """Кто смотрит: chat_id, человек из списка (может не быть у создателя), настоящая роль и роль просмотра."""
     chat_id: int
     student: Student | None
     role: str
@@ -134,17 +135,27 @@ async def viewer(request: web.Request) -> Viewer:
     return Viewer(chat_id, student, role, view, token)
 
 
-async def need(request: web.Request, role: str = "user") -> Viewer:
-    """Как need_staff в admin.py: 'starosta' — староста или админ, 'admin' — только админ."""
+async def feature_ok(db: Database, v: Viewer, feature: str) -> bool:
+    """Включена ли дополнительная функция (features.py) для роли, в которой смотрит человек. Создатель — только в своей роли."""
+    if is_creator(v.chat_id) and v.view == v.role:
+        return True
+    return await db.feature_on(feature, v.view)
+
+
+async def need(request: web.Request, role: str = "user", feature: str | None = None) -> Viewer:
+    """Как need_staff в admin.py: 'starosta' — староста или админ, 'admin' — только админ.
+    feature — ещё и проверка, что эта дополнительная функция включена для роли (features.py)."""
     v = await viewer(request)
     if not v.at_least(role):
         raise Fail("Это только для админов" if role == "admin" else "Это только для старост и админов", 403)
+    if feature and not await feature_ok(db_of(request), v, feature):
+        raise Fail("Эта функция для тебя выключена", 403)
     return v
 
 
-async def need_student(request: web.Request) -> Viewer:
+async def need_student(request: web.Request, feature: str | None = None) -> Viewer:
     """Студенческие действия — только тому, кто есть в списке группы."""
-    v = await need(request)
+    v = await need(request, feature=feature)
     if v.student is None:
         raise Fail("Твой Telegram не привязан к человеку из списка — студенческие кнопки недоступны", 403)
     return v
@@ -157,7 +168,7 @@ async def journal(db: Database, v: Viewer, text: str) -> None:
 def student_json(s: Student) -> dict:
     return {
         "id": s.id, "name": s.name, "active": s.active, "linked": s.linked, "username": s.username,
-        "chat_id": s.chat_id, "role": s.role, "subgroup": s.subgroup, "owner": is_owner(s.chat_id or 0),
+        "chat_id": s.chat_id, "role": s.role, "subgroup": s.subgroup, "creator": is_creator(s.chat_id or 0),
     }
 
 
@@ -241,10 +252,11 @@ async def api_me(request: web.Request) -> web.Response:
     return web.json_response({
         "chat_id": v.chat_id, "name": v.student.name if v.student else None,
         "student": student_json(v.student) if v.student else None,
-        "role": v.role, "view": v.view, "views": views, "owner": is_owner(v.chat_id),
+        "role": v.role, "view": v.view, "views": views, "creator": is_creator(v.chat_id),
         "group": config.GROUP_NO, "version": updater.current_version(),
         "sessions": await db_of(request).web_session_count(v.chat_id),
         "rules": RULE_LINES,
+        "features": {key: await feature_ok(db_of(request), v, key) for key in FEATURES},
     })
 
 
@@ -261,9 +273,11 @@ async def api_badges(request: web.Request) -> web.Response:
         data["requests"] = len(await db.pending_requests()) + len(await db.pending_minus())
         data["suggestions"] = await db.new_suggestions()
     if v.student:
-        for s in await db.subjects():
-            data["swaps"] += sum(w.to_id == v.student.id for w in await db.pending_swaps(s.id, v.student.id))
-        data["polls"] = sum([not p.closed and await db.my_vote(p.id, v.student.id) is None for p in await db.polls()])
+        if await feature_ok(db, v, "swap"):
+            for s in await db.subjects():
+                data["swaps"] += sum(w.to_id == v.student.id for w in await db.pending_swaps(s.id, v.student.id))
+        if await feature_ok(db, v, "polls"):
+            data["polls"] = sum([not p.closed and await db.my_vote(p.id, v.student.id) is None for p in await db.polls()])
     return web.json_response(data)
 
 
@@ -301,10 +315,13 @@ async def load_subject(db: Database, request: web.Request):
 async def queue_json(db: Database, v: Viewer, subject) -> dict:
     rows = await db.queue(subject.id)
     me_id = v.student.id if v.student else None
+    people = {s.id: s for s in await db.students()}
     out, me = [], None
     for place, r in enumerate(rows, 1):
+        who = people.get(r.student_id)
         item = {"place": place, "id": r.student_id, "name": r.name, "done": r.done, "wants": r.wants,
-                "in_bot": r.in_bot, "subgroup": r.subgroup, "me": r.student_id == me_id, "swapped": r.swapped}
+                "in_bot": r.in_bot, "subgroup": r.subgroup, "me": r.student_id == me_id, "swapped": r.swapped,
+                "role": who.role if who and who.linked else "user", "creator": bool(who and who.linked and is_creator(who.chat_id))}
         out.append(item)
         if item["me"]:
             me = dict(item)
@@ -313,6 +330,8 @@ async def queue_json(db: Database, v: Viewer, subject) -> dict:
         me.update(undo_until=iso(until), can_want=not me["wants"] and me["done"] < subject.total,
                   can_done=me["done"] < subject.total, can_minus=me["done"] > 0 and until is None,
                   swap=await my_swap(db, subject, me_id, me["done"]))
+        if not await feature_ok(db, v, "swap") and me["swap"]["state"] is None:
+            me["swap"] = {"state": None, "incoming": [], "blocked": "функция выключена для твоей роли"}
     data = {"subject": subject_json(subject), "rows": out, "me": me, "editable": v.at_least("starosta"),
             "subgroups": any(r.subgroup for r in rows), "at": iso(local_now())}
     if v.at_least("admin"):  # обмены местами: админ может разорвать
@@ -560,7 +579,7 @@ async def api_person_subgroup(request: web.Request) -> web.Response:
 
 
 async def api_person_role(request: web.Request) -> web.Response:
-    """Как cb_person_role: главного админа не трогаем, убранному роль не меняем."""
+    """Как cb_person_role: создателя не трогаем, убранному роль не меняем."""
     v = await need(request, "admin")
     db, bot = db_of(request), bot_of(request)
     s = await load_person(db, request)
@@ -569,8 +588,8 @@ async def api_person_role(request: web.Request) -> web.Response:
         raise Fail("Нет такой роли")
     if not s.active:
         raise Fail("Сначала верни человека в группу")
-    if is_owner(s.chat_id or 0):
-        raise Fail("Это главный админ из настроек сервера — его роль в боте не меняется", 403)
+    if is_creator(s.chat_id or 0):
+        raise Fail("Это создатель из настроек сервера — его роль в боте не меняется", 403)
     if s.role != role:
         await db.set_role(s.id, role)
         if s.linked:
@@ -588,8 +607,8 @@ async def api_person_unlink(request: web.Request) -> web.Response:
     db, bot = db_of(request), bot_of(request)
     s = await load_person(db, request)
     if chat_id := await db.unlink(s.id):
-        await set_commands(bot, chat_id, "admin" if is_owner(chat_id) else None)
-        if not is_owner(chat_id):
+        await set_commands(bot, chat_id, "admin" if is_creator(chat_id) else None)
+        if not is_creator(chat_id):
             await db.web_logout(chat_id=chat_id)
         await journal(db, v, f"Telegram отвязан от {s.name}")
         await send(bot, chat_id, "⌨️ Кнопки под полем ввода убраны.", ReplyKeyboardRemove())
@@ -607,7 +626,7 @@ async def api_person_active(request: web.Request) -> web.Response:
         await db.set_active(s.id, active)
         if s.linked:
             await set_commands(bot, s.chat_id, staff_kind(s.chat_id, await db.get_student(s.id)))
-            if not active and not is_owner(s.chat_id):
+            if not active and not is_creator(s.chat_id):
                 await db.web_logout(chat_id=s.chat_id)
         await journal(db, v, f"{s.name} {'возвращён(а) в группу' if active else 'убран(а) из группы'}")
         await notify(bot, s, "↩️ Тебя вернули в группу — бот снова доступен." if active
@@ -725,7 +744,7 @@ async def api_broadcast(request: web.Request) -> web.Response:
 # ================= обмен местами =================
 async def api_swap_candidates(request: web.Request) -> web.Response:
     """С кем можно поменяться — как cb_swap_pick."""
-    v = await need_student(request)
+    v = await need_student(request, "swap")
     db = db_of(request)
     subject = await load_subject(db, request)
     if reason := await db.swap_blocked(v.student.id, subject.id):
@@ -739,7 +758,7 @@ async def api_swap_candidates(request: web.Request) -> web.Response:
 
 async def api_swap_propose(request: web.Request) -> web.Response:
     """Предложить обмен — как cb_swap_propose: второму приходит сообщение с кнопками (ответить можно и в вебе)."""
-    v = await need_student(request)
+    v = await need_student(request, "swap")
     db, bot = db_of(request), bot_of(request)
     subject = await load_subject(db, request)
     try:
@@ -773,7 +792,7 @@ async def load_my_swap(request: web.Request, db: Database, v: Viewer):
 
 
 async def api_swap_accept(request: web.Request) -> web.Response:
-    v = await need_student(request)
+    v = await need_student(request, "swap")
     db, bot = db_of(request), bot_of(request)
     swap = await load_my_swap(request, db, v)
     result = await db.accept_swap(swap.id, v.student.id)
@@ -788,7 +807,7 @@ async def api_swap_accept(request: web.Request) -> web.Response:
 
 async def api_swap_end(request: web.Request) -> web.Response:
     """Отказаться от предложения, отозвать своё или отменить действующий обмен — как cb_swap_end."""
-    v = await need_student(request)
+    v = await need_student(request, "swap")
     db, bot = db_of(request), bot_of(request)
     swap = await load_my_swap(request, db, v)
     declined = swap.status == "pending" and swap.to_id == v.student.id
@@ -814,10 +833,35 @@ async def api_swap_cancel(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# ================= видимость функций =================
+def features_json(flags: dict) -> list[dict]:
+    return [{"key": f.key, "title": f.title, "hint": f.hint,
+             "roles": {r: flags[(f.key, r)] for r in ROLE_TITLES}} for f in FEATURES.values()]
+
+
+async def api_features(request: web.Request) -> web.Response:
+    await need(request, "admin")
+    db = db_of(request)
+    return web.json_response({"features": features_json({(f, r): await db.feature_on(f, r) for f in FEATURES for r in ROLE_TITLES}),
+                              "roles": ROLE_TITLES})
+
+
+async def api_feature_set(request: web.Request) -> web.Response:
+    v = await need(request, "admin")
+    db = db_of(request)
+    data = await body(request)
+    key, role, enabled = data.get("feature"), data.get("role"), data.get("enabled")
+    if key not in FEATURES or role not in ROLE_TITLES or not isinstance(enabled, bool):
+        raise Fail("Неверная функция или роль")
+    await db.set_feature(key, role, enabled)
+    await journal(db, v, f"функция «{FEATURES[key].title}» для роли {ROLE_TITLES[role].lower()}: {'включена' if enabled else 'выключена'}")
+    return await api_features(request)
+
+
 # ================= голосования =================
 async def poll_json(db: Database, v: Viewer, poll) -> dict:
     """Голосование глазами смотрящего. Цифры видны админу, проголосовавшему и когда голосование закрыто; кто за что — никому."""
-    members = len(await db.member_chats())
+    members = len(await db.feature_chats("polls"))
     mine = await db.my_vote(poll.id, v.student.id) if v.student else None
     admin = v.at_least("admin")
     show_counts = admin or mine is not None or poll.closed
@@ -829,7 +873,8 @@ async def poll_json(db: Database, v: Viewer, poll) -> dict:
         "can_vote": v.student is not None and not poll.closed,
     }
     if admin:
-        data["waiting"] = [short_name(s.name) for s in await db.poll_nonvoters(poll.id)]
+        allowed = set(await db.feature_chats("polls"))
+        data["waiting"] = [short_name(s.name) for s in await db.poll_nonvoters(poll.id) if s.chat_id in allowed]
     return data
 
 
@@ -841,13 +886,13 @@ async def load_poll(request: web.Request, db: Database):
 
 
 async def api_polls(request: web.Request) -> web.Response:
-    v = await need(request)
+    v = await need(request, feature="polls")
     db = db_of(request)
     return web.json_response([await poll_json(db, v, p) for p in await db.polls()])
 
 
 async def api_poll_add(request: web.Request) -> web.Response:
-    v = await need(request, "admin")
+    v = await need(request, "admin", feature="polls")
     db = db_of(request)
     data = await body(request)
     question = " ".join(str(data.get("question", "")).split())
@@ -861,7 +906,7 @@ async def api_poll_add(request: web.Request) -> web.Response:
 
 
 async def api_poll_vote(request: web.Request) -> web.Response:
-    v = await need_student(request)
+    v = await need_student(request, "polls")
     db = db_of(request)
     poll = await load_poll(request, db)
     try:
@@ -877,7 +922,7 @@ async def api_poll_vote(request: web.Request) -> web.Response:
 
 
 async def api_poll_remind(request: web.Request) -> web.Response:
-    v = await need(request, "admin")
+    v = await need(request, "admin", feature="polls")
     db = db_of(request)
     poll = await load_poll(request, db)
     if poll.closed:
@@ -887,14 +932,14 @@ async def api_poll_remind(request: web.Request) -> web.Response:
 
 
 async def api_poll_close(request: web.Request) -> web.Response:
-    v = await need(request, "admin")
+    v = await need(request, "admin", feature="polls")
     db = db_of(request)
     poll = await finish_poll(bot_of(request), db, v.staff, await load_poll(request, db), " · веб")
     return web.json_response(await poll_json(db, v, poll))
 
 
 async def api_poll_delete(request: web.Request) -> web.Response:
-    v = await need(request, "admin")
+    v = await need(request, "admin", feature="polls")
     db = db_of(request)
     await remove_poll(db, v.staff, await load_poll(request, db), " · веб")
     return web.json_response({"ok": True})
@@ -918,14 +963,14 @@ def suggestion_json(sg, v: Viewer) -> dict:
 
 
 async def api_suggestions(request: web.Request) -> web.Response:
-    v = await need(request)
+    v = await need(request, feature="suggestions")
     items = await db_of(request).suggestions(v.student.id if v.student else None, staff=v.at_least("starosta"))
     return web.json_response([suggestion_json(sg, v) for sg in items])
 
 
 async def api_suggestion_add(request: web.Request) -> web.Response:
     """Новое предложение. Анонимное — без автора в базе и в журнале; старостам и админам — уведомление в Telegram."""
-    v = await need(request)
+    v = await need(request, feature="suggestions")
     db = db_of(request)
     data = await body(request)
     text = str(data.get("text", "")).strip()
@@ -943,7 +988,7 @@ async def api_suggestion_add(request: web.Request) -> web.Response:
     sid = await db.add_suggestion(None if anonymous else v.student.id, text, public)
     who = "анонимно" if anonymous else f"от {esc(v.student.name)}"
     where = "видно всей группе" if public else "только старостам и админам"
-    reviewers = sorted((config.ADMIN_IDS | set(await db.staff_chats())) - {v.chat_id})
+    reviewers = sorted((config.CREATOR_IDS | set(await db.staff_chats())) - {v.chat_id})
     await send_many(bot_of(request), reviewers,
                     f"💡 <b>Новое предложение</b> #{sid} ({who}, {where})\n\n{esc(text[:1500])}\n\n"
                     "<i>Ответить — в веб-панели → Предложения.</i>")
@@ -959,7 +1004,7 @@ async def load_suggestion(request: web.Request, db: Database, v: Viewer):
 
 
 async def api_suggestion_answer(request: web.Request) -> web.Response:
-    v = await need(request, "starosta")
+    v = await need(request, "starosta", feature="suggestions")
     db = db_of(request)
     sg = await load_suggestion(request, db, v)
     data = await body(request)
@@ -977,7 +1022,7 @@ async def api_suggestion_answer(request: web.Request) -> web.Response:
 
 
 async def api_suggestion_vote(request: web.Request) -> web.Response:
-    v = await need_student(request)
+    v = await need_student(request, "suggestions")
     db = db_of(request)
     sg = await load_suggestion(request, db, v)
     if not suggestion_json(sg, v)["can_vote"]:
@@ -987,7 +1032,7 @@ async def api_suggestion_vote(request: web.Request) -> web.Response:
 
 
 async def api_suggestion_delete(request: web.Request) -> web.Response:
-    v = await need(request)
+    v = await need(request, feature="suggestions")
     db = db_of(request)
     sg = await load_suggestion(request, db, v)
     if not suggestion_json(sg, v)["can_delete"]:
@@ -1165,6 +1210,8 @@ def make_app(db: Database, bot: Bot) -> web.Application:
     r.add_get("/api/me", api_me)
     r.add_get("/api/overview", api_overview)
     r.add_get("/api/badges", api_badges)
+    r.add_get("/api/features", api_features)
+    r.add_post("/api/features", api_feature_set)
     r.add_get("/api/my", api_my)
     r.add_get("/api/subjects", api_subjects)
     r.add_post("/api/subjects", api_subject_add)

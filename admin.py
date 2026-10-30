@@ -1,7 +1,7 @@
 """Панель Админа (/admin) и панель старосты (/moderator). Староста: заявки, ФИО, правка сданных, рассылка,
 журнал действий. Админ — ещё список группы, роли (студент/староста/админ), отвязка аккаунтов, предметы,
 серверные логи и копия базы.
-Главные админы (ADMIN_IDS в настройках сервера) — как админы, но их нельзя снять из бота.
+Создатели (CREATOR_IDS в настройках сервера) — как админы, но их нельзя снять из бота.
 Каждое действие пишется в журнал, а тому, кого оно касается, приходит уведомление."""
 import asyncio
 import logging
@@ -20,13 +20,14 @@ from aiogram.types import (
 import broadcast
 import config
 from common import (
-    MENU_BTN, bottom_for, btn, check_name, esc, is_admin, is_owner, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
+    MENU_BTN, bottom_for, btn, check_name, esc, feature_allowed, is_admin, is_creator, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed,
     web_role, works, POLL_MAX_OPTIONS, POLL_OPTION_LEN, poll_markup, poll_text,
 )
 import logsink
 import updater
 from db import ROLES, AuditRecord, Database, MinusRequest, Poll, Request, ServerLog, Student, parse_roster
+from features import FEATURES, ROLE_TITLES
 from ranking import WANT
 
 log = logging.getLogger(__name__)
@@ -102,7 +103,9 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
     ]
     if staff.admin:
         rows.append([btn("📚 Предметы", "as"), btn("💾 Копия базы", "abk")])
-        rows.append([btn("🗳 Голосования", "av"), btn("🔁 Обмены", "ax")])
+        polls_on = await feature_allowed(db, "polls", staff.chat_id, await db.student_by_chat(staff.chat_id))
+        rows.append(([btn("🗳 Голосования", "av")] if polls_on else []) + [btn("🔁 Обмены", "ax")])
+        rows.append([btn("⚙️ Функции", "fx")])
         rows.append([btn("🔄 Обновить бота", "abu")])
     if web_allowed("admin" if staff.admin else "starosta"):
         rows.append([btn("🌐 Веб-панель", "aw")])
@@ -158,7 +161,7 @@ def request_text(r: Request, full_name: str = "") -> str:
 
 async def notify_reviewers(bot: Bot, db: Database, request: Request, full_name: str) -> None:
     """Новая заявка — старостам и всем админам."""
-    reviewers = sorted(config.ADMIN_IDS | set(await db.staff_chats()))
+    reviewers = sorted(config.CREATOR_IDS | set(await db.staff_chats()))
     text = f"📨 <b>Новая заявка</b>\n\nTelegram {request_text(request, full_name)}\nЭто правда этот человек?"
     markup = kb([btn("✅ Принять", f"rq:ok:{request.chat_id}"), btn("❌ Отклонить", f"rq:no:{request.chat_id}")])
     for reviewer in reviewers:
@@ -200,7 +203,7 @@ def minus_text(m: MinusRequest) -> str:
 
 async def notify_minus(bot: Bot, db: Database, request: MinusRequest) -> None:
     """Заявка на −1 — старостам и админам, кроме самого просящего."""
-    reviewers = sorted((config.ADMIN_IDS | set(await db.staff_chats())) - {request.student.chat_id})
+    reviewers = sorted((config.CREATOR_IDS | set(await db.staff_chats())) - {request.student.chat_id})
     found = await db.get_row(request.subject.id, request.student.id)
     done = f" (сейчас {found[1].done}/{request.subject.total})" if found else ""
     text = f"🙏 <b>Заявка на −1</b>{done}\n\n{minus_text(request)}"
@@ -296,14 +299,15 @@ async def cb_review(cb: CallbackQuery, db: Database):
 
 # ================= люди =================
 ROLE_ICONS = {"admin": "♒️", "starosta": "✴️"}
+CREATOR_ICON = "👑"
 
 
 def person_icon(s: Student) -> str:
-    """❌ не зарегистрирован · ✅ студент · ✴️ староста · ♒️ админ."""
+    """❌ не зарегистрирован · ✅ студент · ✴️ староста · ♒️ админ · 👑 создатель."""
     if not s.linked:
         return "❌" + ROLE_ICONS.get(s.role, "")  # роль, назначенная заранее, включится после регистрации
-    if is_owner(s.chat_id):
-        return ROLE_ICONS["admin"]
+    if is_creator(s.chat_id):
+        return CREATOR_ICON
     return ROLE_ICONS.get(s.role, "✅")
 
 
@@ -407,7 +411,7 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
                  for n, t in ((1, "1 подгр."), (2, "2 подгр."), (0, "без подгр."))]
     rows = [*rows_of(progress), subgroups, [btn("✏️ Исправить ФИО", f"aun:{s.id}")]]
     if staff.admin:
-        if s.active and not is_owner(s.chat_id or 0):
+        if s.active and not is_creator(s.chat_id or 0):
             rows.append([
                 btn(("✓ " if s.role == role else "") + ROLE_BUTTONS[role], f"aur:{s.id}:{role}") for role in ROLES
             ])
@@ -465,8 +469,8 @@ ROLE_NOTES = {
 
 
 def role_title(s: Student) -> str:
-    if is_owner(s.chat_id or 0):
-        return "главный админ ♒️ (из настроек сервера)"
+    if is_creator(s.chat_id or 0):
+        return "создатель 👑 (из настроек сервера)"
     title = {"admin": "админ ♒️", "starosta": "староста ✴️"}.get(s.role, "студент ✅")
     return title if s.linked or s.role == "user" else f"{title} — получит, когда зарегистрируется"
 
@@ -539,8 +543,8 @@ async def cb_person_role(cb: CallbackQuery, db: Database):
     if not s.active:
         await cb.answer("Сначала верни человека в группу", show_alert=True)
         return
-    if is_owner(s.chat_id or 0):
-        await cb.answer("Это главный админ из настроек сервера — его роль в боте не меняется", show_alert=True)
+    if is_creator(s.chat_id or 0):
+        await cb.answer("Это создатель из настроек сервера — его роль в боте не меняется", show_alert=True)
         return
     if s.role == role:
         await cb.answer(f"Уже {ROLE_NAMES[role]}")
@@ -572,7 +576,7 @@ async def cb_person_unlink_ok(cb: CallbackQuery, db: Database):
         return
     chat_id = await db.unlink(s.id)
     if chat_id:
-        await set_commands(cb.bot, chat_id, "admin" if is_owner(chat_id) else None)
+        await set_commands(cb.bot, chat_id, "admin" if is_creator(chat_id) else None)
         await journal_add(db, staff, f"Telegram отвязан от {s.name}")
         await send(cb.bot, chat_id, "⌨️ Кнопки под полем ввода убраны.", ReplyKeyboardRemove())
         await send(cb.bot, chat_id, f"🔓 Твой Telegram отвязан от «{esc(s.name)}» ({esc(staff.signature)}). "
@@ -805,6 +809,40 @@ async def cb_broadcast_send(cb: CallbackQuery, state: FSMContext, db: Database):
     await show(cb, f"📢 Отправлено: {sent} из {len(chat_ids)}.", kb([ADMIN_BTN]), ack=False)
 
 
+# ================= видимость функций (только админ) =================
+@router.callback_query(F.data == "fx")
+async def cb_features(cb: CallbackQuery, state: FSMContext, db: Database):
+    await state.clear()
+    if await need_staff(cb, db, admin_only=True):
+        await show_features(cb, db)
+
+
+async def show_features(cb: CallbackQuery, db: Database):
+    flags = {(f, r): await db.feature_on(f, r) for f in FEATURES for r in ROLES}
+    text = ("⚙️ <b>Функции</b>\n\nКому из ролей видны дополнительные возможности (очередь отключить нельзя). "
+            "Создатель видит всё всегда.\n")
+    rows = []
+    for key, feature in FEATURES.items():
+        text += f"\n<b>{esc(feature.title)}</b>\n<i>{esc(feature.hint)}</i>\n"
+        rows.append([btn(f"{feature.title.split()[0]} {ROLE_TITLES[r]} {'✅' if flags[(key, r)] else '⛔'}", f"fx:{key}:{r}") for r in ROLES])
+    await show(cb, text, kb(*rows, [ADMIN_BTN]))
+
+
+@router.callback_query(F.data.regexp(r"^fx:\w+:\w+$"))
+async def cb_feature_toggle(cb: CallbackQuery, db: Database):
+    if not (staff := await need_staff(cb, db, admin_only=True)):
+        return
+    _, key, role = cb.data.split(":")
+    if key not in FEATURES or role not in ROLES:
+        await cb.answer("Такой функции нет", show_alert=True)
+        return
+    enabled = not await db.feature_on(key, role)
+    await db.set_feature(key, role, enabled)
+    await journal_add(db, staff, f"функция «{FEATURES[key].title}» для роли {ROLE_TITLES[role].lower()}: {'включена' if enabled else 'выключена'}")
+    await cb.answer("Включено" if enabled else "Выключено")
+    await show_features(cb, db)
+
+
 # ================= обмены местами (только админ) =================
 @router.callback_query(F.data == "ax")
 async def cb_swaps(cb: CallbackQuery, state: FSMContext, db: Database):
@@ -843,6 +881,19 @@ async def cb_swap_break(cb: CallbackQuery, db: Database):
 
 
 # ================= голосования (только админ) =================
+async def need_polls(target: Message | CallbackQuery, db: Database) -> Staff | None:
+    """Админ, которому включены голосования (раздел «Функции»)."""
+    if not (staff := await need_staff(target, db, admin_only=True)):
+        return None
+    if not await feature_allowed(db, "polls", target.from_user.id, await db.student_by_chat(target.from_user.id)):
+        if isinstance(target, CallbackQuery):
+            await target.answer("Голосования для админов выключены в настройках функций", show_alert=True)
+        else:
+            await target.answer("Голосования для админов выключены в настройках функций")
+        return None
+    return staff
+
+
 def poll_title(poll: Poll, voted: int | None = None, members: int | None = None) -> str:
     done = f" · {voted}/{members}" if voted is not None else ""
     return f"{'🔒' if poll.closed else '🟢'} {poll.question[:32]}{done}"
@@ -860,7 +911,7 @@ def clean_poll_options(lines: list[str]) -> list[str] | None:
 async def publish_poll(bot: Bot, db: Database, staff: Staff, question: str, options: list[str], suffix: str = "") -> tuple[Poll, int, int]:
     """Создаёт голосование и рассылает всей группе в боте. Возвращает (голосование, дошло, всего)."""
     poll = await db.get_poll(await db.create_poll(question, options, staff.signature))
-    chat_ids = await db.member_chats()
+    chat_ids = await db.feature_chats("polls")
     sent = await send_many(bot, chat_ids, poll_text(poll, None, len(chat_ids)), poll_markup(poll))
     await journal_add(db, staff, f"голосование #{poll.id} (дошло {sent} из {len(chat_ids)}): {poll.question[:80]}{suffix}")
     return poll, sent, len(chat_ids)
@@ -868,8 +919,9 @@ async def publish_poll(bot: Bot, db: Database, staff: Staff, question: str, opti
 
 async def remind_poll(bot: Bot, db: Database, staff: Staff, poll: Poll, suffix: str = "") -> tuple[int, int]:
     """Напоминает не голосовавшим. Возвращает (дошло, кому слали)."""
-    waiting = [s.chat_id for s in await db.poll_nonvoters(poll.id)]
-    members = len(await db.member_chats())
+    allowed = set(await db.feature_chats("polls"))
+    waiting = [s.chat_id for s in await db.poll_nonvoters(poll.id) if s.chat_id in allowed]
+    members = len(await db.feature_chats("polls"))
     sent = await send_many(bot, waiting, "🔔 Ты ещё не проголосовал(а):\n\n" + poll_text(poll, None, members), poll_markup(poll))
     await journal_add(db, staff, f"напоминание о голосовании #{poll.id}: дошло {sent} из {len(waiting)}{suffix}")
     return sent, len(waiting)
@@ -882,7 +934,7 @@ async def finish_poll(bot: Bot, db: Database, staff: Staff, poll: Poll, suffix: 
     await db.close_poll(poll.id)
     poll = await db.get_poll(poll.id)
     await journal_add(db, staff, f"голосование #{poll.id} закрыто: {poll.question[:80]}{suffix}")
-    chat_ids = await db.member_chats()
+    chat_ids = await db.feature_chats("polls")
     await send_many(bot, chat_ids, poll_text(poll, await db.poll_counts(poll.id), len(chat_ids)))
     return poll
 
@@ -895,9 +947,9 @@ async def remove_poll(db: Database, staff: Staff, poll: Poll, suffix: str = "") 
 @router.callback_query(F.data == "av")
 async def cb_polls(cb: CallbackQuery, state: FSMContext, db: Database):
     await state.clear()
-    if not await need_staff(cb, db, admin_only=True):
+    if not await need_polls(cb, db):
         return
-    members, rows = len(await db.member_chats()), []
+    members, rows = len(await db.feature_chats("polls")), []
     for poll in await db.polls():
         rows.append([btn(poll_title(poll, sum((await db.poll_counts(poll.id)).values()), members), f"av:{poll.id}")])
     await show(
@@ -909,7 +961,7 @@ async def cb_polls(cb: CallbackQuery, state: FSMContext, db: Database):
 
 @router.callback_query(F.data == "avn")
 async def cb_poll_new(cb: CallbackQuery, state: FSMContext, db: Database):
-    if not await need_staff(cb, db, admin_only=True):
+    if not await need_polls(cb, db):
         return
     await state.set_state(AdminForm.poll_question)
     await show(cb, "🗳 <b>Новое голосование</b>\n\nНапиши вопрос одним сообщением.", kb([btn("⬅️ Отмена", "av")]))
@@ -917,7 +969,7 @@ async def cb_poll_new(cb: CallbackQuery, state: FSMContext, db: Database):
 
 @router.message(AdminForm.poll_question, F.text, ~F.text.startswith("/"))
 async def admin_poll_question(msg: Message, state: FSMContext, db: Database):
-    if not await need_staff(msg, db, admin_only=True):
+    if not await need_polls(msg, db):
         await state.clear()
         return
     question = " ".join(msg.text.split())
@@ -935,7 +987,7 @@ async def admin_poll_question(msg: Message, state: FSMContext, db: Database):
 
 @router.message(AdminForm.poll_options, F.text, ~F.text.startswith("/"))
 async def admin_poll_options(msg: Message, state: FSMContext, db: Database):
-    if not await need_staff(msg, db, admin_only=True):
+    if not await need_polls(msg, db):
         await state.clear()
         return
     options = clean_poll_options(msg.text.splitlines())
@@ -946,7 +998,7 @@ async def admin_poll_options(msg: Message, state: FSMContext, db: Database):
     question = (await state.get_data())["question"]
     preview = Poll(0, question, "", "", False, list(enumerate(options)))
     await msg.answer(
-        f"Так увидит группа ({len(await db.member_chats())} чел. в боте):\n\n{poll_text(preview, None, 0)}\n\n"
+        f"Так увидит группа ({len(await db.feature_chats('polls'))} чел. в боте):\n\n{poll_text(preview, None, 0)}\n\n"
         + "\n".join(f"▫️ {esc(o)}" for o in options),
         reply_markup=kb([btn("🗳 Отправить", "avs")], [btn("✏️ Заново", "avn"), btn("⬅️ Отмена", "av")]),
     )
@@ -954,7 +1006,7 @@ async def admin_poll_options(msg: Message, state: FSMContext, db: Database):
 
 @router.callback_query(AdminForm.poll_options, F.data == "avs")
 async def cb_poll_send(cb: CallbackQuery, state: FSMContext, db: Database):
-    staff = await need_staff(cb, db, admin_only=True)
+    staff = await need_polls(cb, db)
     data = await state.get_data()
     if not staff or not data.get("options"):
         await cb.answer("Сначала напиши вопрос и варианты", show_alert=True)
@@ -966,9 +1018,10 @@ async def cb_poll_send(cb: CallbackQuery, state: FSMContext, db: Database):
 
 
 async def show_poll_card(cb: CallbackQuery, db: Database, poll: Poll, ack: bool = True):
-    members = len(await db.member_chats())
+    members = len(await db.feature_chats("polls"))
     text = poll_text(poll, await db.poll_counts(poll.id), members)
-    waiting = await db.poll_nonvoters(poll.id)
+    allowed = set(await db.feature_chats("polls"))
+    waiting = [x for x in await db.poll_nonvoters(poll.id) if x.chat_id in allowed]
     if waiting:
         names = ", ".join(esc(short_name(s.name)) for s in waiting[:30])
         text += f"\n\n<b>Ещё не проголосовали ({len(waiting)}):</b> {names}{' …' if len(waiting) > 30 else ''}"
@@ -990,13 +1043,13 @@ async def load_poll(cb: CallbackQuery, db: Database, poll_id: int) -> Poll | Non
 
 @router.callback_query(F.data.regexp(r"^av:\d+$"))
 async def cb_poll_card(cb: CallbackQuery, db: Database):
-    if await need_staff(cb, db, admin_only=True) and (poll := await load_poll(cb, db, int(cb.data[3:]))):
+    if await need_polls(cb, db) and (poll := await load_poll(cb, db, int(cb.data[3:]))):
         await show_poll_card(cb, db, poll)
 
 
 @router.callback_query(F.data.regexp(r"^avr:\d+$"))
 async def cb_poll_remind(cb: CallbackQuery, db: Database):
-    if not (staff := await need_staff(cb, db, admin_only=True)) or not (poll := await load_poll(cb, db, int(cb.data[4:]))):
+    if not (staff := await need_polls(cb, db)) or not (poll := await load_poll(cb, db, int(cb.data[4:]))):
         return
     if poll.closed:
         await cb.answer("Голосование закрыто", show_alert=True)
@@ -1007,7 +1060,7 @@ async def cb_poll_remind(cb: CallbackQuery, db: Database):
 
 @router.callback_query(F.data.regexp(r"^(avx|avd):\d+$"))
 async def cb_poll_ask(cb: CallbackQuery, db: Database):
-    if not await need_staff(cb, db, admin_only=True):
+    if not await need_polls(cb, db):
         return
     action, poll_id = cb.data.split(":")
     if not (poll := await load_poll(cb, db, int(poll_id))):
@@ -1024,7 +1077,7 @@ async def cb_poll_ask(cb: CallbackQuery, db: Database):
 
 @router.callback_query(F.data.regexp(r"^(avxok|avdok):\d+$"))
 async def cb_poll_do(cb: CallbackQuery, db: Database):
-    if not (staff := await need_staff(cb, db, admin_only=True)):
+    if not (staff := await need_polls(cb, db)):
         return
     action, poll_id = cb.data.split(":")
     if not (poll := await load_poll(cb, db, int(poll_id))):
