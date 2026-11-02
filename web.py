@@ -1,7 +1,8 @@
 """Веб-панель: та же очередь и Панель Админа в браузере (aiohttp, работает в процессе бота).
 
 Вход — только по одноразовой ссылке из бота (/web или «🌐 Веб-панель» в панели): браузер обменивает её на
-сессию (cookie `qb_session`, HttpOnly, SameSite=Strict). Пускаем роли из WEB_ROLES (по умолчанию — всех из списка группы).
+сессию (cookie `qb_session`, HttpOnly, SameSite=Strict). Пускаем роли, которым админ открыл панель (⚙️ Функции → 🌐 Веб-панель;
+пока не меняли — WEB_ROLES, по умолчанию все из списка группы).
 Права проверяются на каждом запросе заново, как need_staff в admin.py: роль могли снять минуту назад.
 Админ может посмотреть панель глазами старосты или студента (заголовок X-View-As) — это только понижение прав.
 Действия пишутся в тот же журнал (с пометкой «веб»), а людям приходят те же уведомления в Telegram.
@@ -42,7 +43,7 @@ from features import FEATURES, GAME_KINDS, ROLE_TITLES
 from games import ticket as games_ticket
 from common import (
     POLL_MAX_OPTIONS, POLL_OPTION_LEN, bottom_for, btn, check_name, esc, is_creator, kb, send, send_many, set_commands, short_name,
-    staff_kind, web_allowed, web_role, ago, is_online,
+    staff_kind, sync_menus_soon, web_allowed, web_role, web_roles, ago, is_online,
 )
 from db import ROLES, SUGGESTION_STATUSES, Database, Student, local_now, parse_roster
 from handlers import places
@@ -133,7 +134,7 @@ async def viewer(request: web.Request) -> Viewer:
         raise Fail("Нужно войти: напиши боту /web и открой ссылку", 401)
     student = await db.student_by_chat(chat_id)
     role = web_role(chat_id, student)
-    if not web_allowed(role):
+    if not web_allowed(role, chat_id):
         raise Fail("Веб-панель для тебя закрыта — роль изменилась", 403)
     who_var.set(short_name(student.name) if student else f"ID {chat_id}")
     view = request.headers.get("X-View-As", role)
@@ -236,7 +237,7 @@ async def api_login(request: web.Request) -> web.Response:
     role = web_role(chat_id, student)
     if role is None:
         raise Fail("Сначала выбери себя из списка группы в боте (/start) — после принятия заявки панель откроется", 403)
-    if not web_allowed(role):
+    if not web_allowed(role, chat_id):
         raise Fail("Веб-панель для твоей роли пока закрыта", 403)
     session = await db.web_token(chat_id, "session", SESSION_TTL)
     log.info("Вход в веб-панель (id %s)", chat_id)
@@ -630,7 +631,7 @@ async def api_person_role(request: web.Request) -> web.Response:
         await db.set_role(s.id, role)
         if s.linked:
             await set_commands(bot, s.chat_id, staff_kind(s.chat_id, await db.get_student(s.id)))
-            if not web_allowed(web_role(s.chat_id, await db.get_student(s.id))):
+            if not web_allowed(web_role(s.chat_id, await db.get_student(s.id)), s.chat_id):
                 await db.web_logout(chat_id=s.chat_id)  # роль больше не пускает в веб-панель
         await journal(db, v, f"роль {s.name}: {ROLE_NAMES[s.role]} → {ROLE_NAMES[role]}")
         await notify(bot, s, f"Твоя роль теперь — <b>{ROLE_NAMES[role]}</b> ({esc(v.staff.signature)}).\n{ROLE_NOTES[role]}",
@@ -1069,6 +1070,8 @@ async def api_feature_set(request: web.Request) -> web.Response:
         raise Fail("Неверная функция или роль")
     await db.set_feature(key, role, enabled)
     await journal(db, v, f"функция «{FEATURES[key].title}» для роли {ROLE_TITLES[role].lower()}: {'включена' if enabled else 'выключена'}")
+    if key == "web":
+        sync_menus_soon(bot_of(request), db)  # /web и кнопка «Панель» появятся или пропадут у этой роли
     return await api_features(request)
 
 
@@ -1360,7 +1363,7 @@ async def api_server(request: web.Request) -> web.Response:
     return web.json_response({
         "version": updater.current_version(), "update_available": updater.available(), "update_busy": updater.busy(),
         "uptime": time.time() - STARTED, "started": STARTED * 1000, "db_size": size,
-        "python": sys.version.split()[0], "timezone": str(config.TIMEZONE), "web_roles": sorted(config.WEB_ROLES),
+        "python": sys.version.split()[0], "timezone": str(config.TIMEZONE), "web_roles": web_roles(),
         "sessions": await db_of(request).web_session_count(v.chat_id),
         "games": await games_probe(request, "/stats", 1.0),
     })

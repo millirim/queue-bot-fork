@@ -13,7 +13,7 @@ import aiosqlite
 
 import config
 from metrics import M
-from features import FEATURES, ROLES as ROLES_FOR_FEATURES
+from features import FEATURES, WEB_OVERRIDE, ROLES as ROLES_FOR_FEATURES
 from ranking import Row, apply_swaps, draw_lot, order
 
 log = logging.getLogger(__name__)
@@ -405,6 +405,8 @@ class Database:
         await self.conn.commit()
         await self._add_new_columns()
         await self._seed_subjects()
+        WEB_OVERRIDE.clear()
+        WEB_OVERRIDE.update({r: v for (f, r), v in (await self.feature_flags()).items() if f == "web"})
 
     async def _drop_old_schema(self) -> None:
         version = (await self._one("PRAGMA user_version"))[0]
@@ -588,13 +590,15 @@ class Database:
     async def feature_on(self, feature: str, role: str) -> bool:
         """Включена ли функция для роли ('user', 'starosta', 'admin'); создателя проверяет вызывающий."""
         row = await self._one("SELECT enabled FROM feature_flags WHERE feature = ? AND role = ?", (feature, role))
-        return bool(row["enabled"]) if row else role in FEATURES[feature].roles
+        return bool(row["enabled"]) if row else FEATURES[feature].default(role)
 
     async def set_feature(self, feature: str, role: str, enabled: bool) -> None:
         assert feature in FEATURES and role in ROLES_FOR_FEATURES
         await self._write(
             "INSERT INTO feature_flags (feature, role, enabled) VALUES (?, ?, ?) "
             "ON CONFLICT(feature, role) DO UPDATE SET enabled = excluded.enabled", (feature, role, int(enabled)))
+        if feature == "web":
+            WEB_OVERRIDE[role] = enabled
 
     async def feature_chats(self, feature: str) -> list[int]:
         """Telegram тех, кому функция включена (для рассылок): по роли человека; создатели — всегда."""
