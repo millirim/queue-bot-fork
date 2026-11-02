@@ -15,6 +15,7 @@ from aiogram.types import (
 
 import config
 from db import ONLINE_SECONDS, Database, Poll, Student, Subject
+from features import ROLES, WEB_OVERRIDE
 from ranking import WANT, Row
 
 log = logging.getLogger(__name__)
@@ -60,13 +61,24 @@ def web_role(chat_id: int, student: Student | None) -> str | None:
     return "user" if student else None
 
 
-def web_allowed(role: str | None) -> bool:
-    """Можно ли этой роли в веб-панель (WEB_ROLES) и включена ли она вообще (WEB_PORT)."""
-    return bool(config.WEB_PORT) and role in config.WEB_ROLES
+def web_allowed(role: str | None, chat_id: int | None = None) -> bool:
+    """Можно ли этой роли в веб-панель и включена ли она вообще (WEB_PORT).
+    Решает админ в «Функциях» (строка «🌐 Веб-панель»); пока не менял — WEB_ROLES. Создатель — всегда."""
+    if not config.WEB_PORT or role is None:
+        return False
+    if chat_id is not None and is_creator(chat_id):
+        return True
+    return WEB_OVERRIDE.get(role, role in config.WEB_ROLES)
 
 
-if web_allowed("user"):
-    BASE_COMMANDS.append(WEB_COMMAND)
+def web_roles() -> list[str]:
+    """Кому сейчас открыта веб-панель."""
+    return [r for r in ROLES if web_allowed(r)]
+
+
+def base_commands() -> list[BotCommand]:
+    """Команды для всех; /web — если веб-панель открыта студентам."""
+    return BASE_COMMANDS + ([WEB_COMMAND] if web_allowed("user") else [])
 
 
 def panel_name(kind: str | None) -> str:
@@ -89,9 +101,9 @@ def staff_kind(chat_id: int, student: Student | None) -> str | None:
     return "moderator" if student and student.starosta else None
 
 
-def menu_button_for(role: str | None):
+def menu_button_for(role: str | None, chat_id: int | None = None):
     """«Панель» (мини-приложение), если этой роли открыта веб-панель по https; иначе обычная кнопка команд."""
-    if web_allowed(role) and config.WEB_URL.startswith("https://"):
+    if web_allowed(role, chat_id) and config.WEB_URL.startswith("https://"):
         return MenuButtonWebApp(text="Панель", web_app=WebAppInfo(url=config.WEB_URL))
     return MenuButtonCommands()
 
@@ -103,7 +115,7 @@ async def set_menu_button(bot: Bot, chat_id: int | None, role: str | None) -> No
         if chat_id is None:
             await bot.set_chat_menu_button(menu_button=menu_button_for("user"))
             return
-        button = MenuButtonDefault() if role is None else menu_button_for(role)
+        button = MenuButtonDefault() if role is None else menu_button_for(role, chat_id)
         await bot.set_chat_menu_button(chat_id=chat_id, menu_button=button)
     except TelegramAPIError as e:
         log.info("Кнопка меню для %s не обновлена: %s", chat_id, e)
@@ -118,10 +130,35 @@ async def set_commands(bot: Bot, chat_id: int, kind: str | None) -> None:
             await bot.delete_my_commands(scope=scope)
         else:
             role = "admin" if kind == "admin" else "starosta"
-            web = [WEB_COMMAND] if web_allowed(role) and WEB_COMMAND not in BASE_COMMANDS else []
-            await bot.set_my_commands([*BASE_COMMANDS, STAFF_COMMANDS[kind], *web], scope=scope)
+            web = [WEB_COMMAND] if web_allowed(role, chat_id) and not web_allowed("user") else []
+            await bot.set_my_commands([*base_commands(), STAFF_COMMANDS[kind], *web], scope=scope)
     except TelegramAPIError as e:  # например, человек ещё ни разу не писал боту
         log.info("Команды для %s не обновлены: %s", chat_id, e)
+
+
+_background: set[asyncio.Task] = set()
+
+
+def sync_menus_soon(bot: Bot, db: Database) -> None:
+    """sync_menus в фоне: у многих людей это десятки запросов к Telegram, кнопка не должна их ждать."""
+    task = asyncio.create_task(sync_menus(bot, db))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def sync_menus(bot: Bot, db: Database) -> None:
+    """Команды и кнопка «Панель» у всех: при запуске и когда админ открыл или закрыл веб-панель какой-то роли.
+    У всех — обычные команды; у старост добавляется /moderator, у админов — /admin."""
+    try:
+        await bot.set_my_commands(base_commands())
+    except TelegramAPIError as e:
+        log.info("Общие команды не обновлены: %s", e)
+    await set_menu_button(bot, None, None)  # общая кнопка «Панель», если веб открыт студентам и есть https
+    for chat_id in config.CREATOR_IDS:
+        await set_commands(bot, chat_id, "admin")
+    for student in await db.students():
+        if student.linked and not is_creator(student.chat_id) and (kind := staff_kind(student.chat_id, student)):
+            await set_commands(bot, student.chat_id, kind)
 
 
 # --- кулдаун «Обновить» ---

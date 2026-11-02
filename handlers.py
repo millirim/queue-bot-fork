@@ -25,7 +25,7 @@ async def main_menu(db: Database, chat_id: int, student: Student | None) -> Inli
     """Главное меню: предметы и «Моё»; старостам и админам — их панель."""
     subjects = [btn(s.title, f"s:{s.id}") for s in await db.subjects()]
     rows = rows_of(subjects) + [[btn("👤 Моё", "my")]]
-    if web_allowed(web_role(chat_id, student)):
+    if web_allowed(web_role(chat_id, student), chat_id):
         rows[-1].append(btn("🌐 Веб-панель", "aw"))
     if is_staff(chat_id, student):
         rows.append([btn(f"🛠 {panel_name(staff_kind(chat_id, student))}", "adm")])
