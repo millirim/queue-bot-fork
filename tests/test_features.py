@@ -5,6 +5,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 import config
+import features
 import web
 from db import Database
 from harness import Harness
@@ -129,3 +130,52 @@ def test_web_respects_flags(tmp_path):
         finally:
             await client.close(); await db.close()
     run(scenario())
+
+
+def test_web_access_is_a_setting(tmp_path, monkeypatch):
+    """Кому открыта веб-панель — строка «🌐 Веб-панель» в «Функциях»; WEB_ROLES — только значение по умолчанию."""
+    from common import sync_menus, web_allowed, web_roles
+    monkeypatch.setattr(config, "WEB_ROLES", {"admin"})
+
+    async def scenario():
+        db, _ = await setup(tmp_path)
+        h = Harness(); dp = h.dispatcher(db)
+        assert web_roles() == ["admin"] and not await db.feature_on("web", "user"), "пока не меняли — как в WEB_ROLES"
+        await sync_menus(h.bot, db)
+        assert "web" not in h.session.commands[None] and "web" in h.session.commands[ADMIN]
+
+        # Бот: админ открывает панель студентам кнопкой в «Функциях»; меню у всех обновляется само.
+        await h.press(dp, ADMIN, "fx")
+        assert "fx:web:user" in h.buttons(ADMIN)
+        await h.press(dp, ADMIN, "fx:web:user")
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert web_allowed("user") and "web" in h.session.commands[None], "/web появилась у всех"
+        assert h.session.commands[STAROSTA].count("web") == 1, "у старосты /web — из общих команд, без дубля"
+        assert "Веб-панель" in (await db.journal(1))[0].text
+
+        client = TestClient(TestServer(web.make_app(db, h.bot))); await client.start_server()
+        try:
+            async def login(chat):
+                client.session.cookie_jar.clear()
+                return (await client.post("/api/login", json={"token": await db.web_token(chat, "login", 600)}, headers=H)).status
+            assert await login(STUDENT) == 200, "студент входит"
+            assert await login(STAROSTA) == 403, "старостам по-прежнему закрыто"
+            assert await login(ADMIN) == 200
+            assert (await (await client.get("/api/server")).json())["web_roles"] == ["user", "admin"]
+            r = await client.post("/api/features", json={"feature": "web", "role": "user", "enabled": False}, headers=H)
+            assert r.status == 200 and next(f for f in (await r.json())["features"] if f["key"] == "web")["roles"]["user"] is False
+            await login(ADMIN)
+            await db.set_feature("web", "admin", False)
+            assert (await client.get("/api/me")).status == 403, "открытая вкладка закрывается на следующем запросе"
+            assert await login(CREATOR) == 200, "создатель входит всегда"
+        finally:
+            await client.close(); await db.close()
+
+        db2 = Database(str(tmp_path / "q.db")); await db2.connect()
+        assert web_roles() == [], "после перезапуска настройка из базы, а не из WEB_ROLES"
+        await db2.close()
+    try:
+        run(scenario())
+    finally:
+        features.WEB_OVERRIDE.clear()  # не тащить настройку в другие тесты

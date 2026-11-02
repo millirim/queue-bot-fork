@@ -14,7 +14,7 @@ import metrics
 import replication
 import updater
 import web
-from common import BASE_COMMANDS, ActivityMiddleware, set_commands, set_menu_button, staff_kind
+from common import ActivityMiddleware, sync_menus
 from db import Database
 
 log = logging.getLogger("queue-bot")
@@ -54,14 +54,7 @@ async def main() -> None:
     dp.include_router(admin.router)
     dp.include_router(handlers.router)
 
-    # У всех — обычные команды; у старост добавляется /moderator, у админов — /admin.
-    await bot.set_my_commands(BASE_COMMANDS)
-    await set_menu_button(bot, None, None)  # общая кнопка «Панель», если веб открыт студентам и есть https
-    for chat_id in config.CREATOR_IDS:
-        await set_commands(bot, chat_id, "admin")
-    for student in await db.students():
-        if student.linked and (kind := staff_kind(student.chat_id, student)):
-            await set_commands(bot, student.chat_id, kind)
+    await sync_menus(bot, db)  # команды и кнопка «Панель» — по ролям и по тому, кому открыта веб-панель
 
     try:
         update_watcher = asyncio.create_task(updater.deliver_results(bot))  # итог обновления по кнопке — админу в чат

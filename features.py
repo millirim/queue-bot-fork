@@ -7,6 +7,8 @@
 """
 from dataclasses import dataclass
 
+import config
+
 ROLES = ("user", "starosta", "admin")
 ROLE_TITLES = {"user": "Студенты", "starosta": "Старосты", "admin": "Админы"}
 
@@ -18,8 +20,15 @@ class Feature:
     hint: str
     roles: tuple[str, ...] = ROLES  # у каких ролей включено по умолчанию
 
+    def default(self, role: str) -> bool:
+        """Значение, пока админ ничего не менял. Для веб-панели — из WEB_ROLES в настройках сервера."""
+        return role in config.WEB_ROLES if self.key == "web" else role in self.roles
+
 
 FEATURES: dict[str, Feature] = {f.key: f for f in (
+    Feature("web", "🌐 Веб-панель", "Вход в веб-панель: /web, кнопка «Панель» у поля ввода и «🌐 Веб-панель» в меню. "
+            "Выключено — роль не войдёт, открытые вкладки закроются при следующем запросе. Создатель входит всегда. "
+            "Пока не меняли — как в WEB_ROLES на сервере."),
     Feature("swap", "🔁 Обмен местами", "Кнопка «Поменяться» в очереди: предложить обмен и согласиться на него. "
             "Уже действующие обмены продолжают работать, пока их не разорвут."),
     Feature("polls", "🗳 Голосования", "Видеть и голосовать (админам — ещё создавать и закрывать). Тем, у кого выключено, "
@@ -36,6 +45,11 @@ FEATURES: dict[str, Feature] = {f.key: f for f in (
     Feature("game_poker", "♠ Покер", "Техасский холдем на игровые фишки (не деньги), 2–6 человек."),
     Feature("suggestions", "💡 Предложения", "Писать идеи по боту и веб-панели, голосовать за чужие (в вебе). Отвечают старосты и админы."),
 )}
+
+
+# Включена ли веб-панель ролям — копия строк feature_flags для "web" (db.connect и db.set_feature держат её свежей).
+# Нужна, потому что вход проверяется и в синхронном коде (кнопка меню Telegram); нет строки — берётся WEB_ROLES.
+WEB_OVERRIDE: dict[str, bool] = {}
 
 
 GAME_KINDS = ("2048", "snake", "checkers", "chess", "blackjack", "poker")  # ключи игр; у каждой своя функция game_<ключ>

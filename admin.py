@@ -22,7 +22,7 @@ import config
 from common import (
     MENU_BTN, bottom_for, btn, check_name, esc, feature_allowed, presence_line, is_admin, is_creator, kb, panel_name, queue_text, refresh_wait, rows_of, send, send_many, set_commands,
     edit_sent, set_subgroup_view, short_name, show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed,
-    web_role, works, POLL_MAX_OPTIONS, POLL_OPTION_LEN, poll_markup, poll_text,
+    sync_menus_soon, web_role, works, POLL_MAX_OPTIONS, POLL_OPTION_LEN, poll_markup, poll_text,
 )
 import logsink
 import updater
@@ -107,7 +107,7 @@ async def show_menu(target: Message | CallbackQuery, db: Database, staff: Staff)
         rows.append(([btn("🗳 Голосования", "av")] if polls_on else []) + [btn("🔁 Обмены", "ax")])
         rows.append([btn("⚙️ Функции", "fx")])
         rows.append([btn("🔄 Обновить бота", "abu")])
-    if web_allowed("admin" if staff.admin else "starosta"):
+    if web_allowed("admin" if staff.admin else "starosta", staff.chat_id):
         rows.append([btn("🌐 Веб-панель", "aw")])
     rows.append([MENU_BTN])
     who = "админ" if staff.admin else "староста"
@@ -843,6 +843,8 @@ async def cb_feature_toggle(cb: CallbackQuery, db: Database):
     enabled = not await db.feature_on(key, role)
     await db.set_feature(key, role, enabled)
     await journal_add(db, staff, f"функция «{FEATURES[key].title}» для роли {ROLE_TITLES[role].lower()}: {'включена' if enabled else 'выключена'}")
+    if key == "web":
+        sync_menus_soon(cb.bot, db)  # /web и кнопка «Панель» появятся или пропадут у этой роли
     await cb.answer("Включено" if enabled else "Выключено")
     await show_features(cb, db)
 
@@ -1268,10 +1270,10 @@ def web_app_button() -> InlineKeyboardMarkup | None:
 
 
 async def send_web_link(target: Message | CallbackQuery, db: Database) -> None:
-    """Одноразовая ссылка для входа в веб-панель (web.py) — тем, кому можно по WEB_ROLES."""
+    """Одноразовая ссылка для входа в веб-панель (web.py) — тем, кому она открыта (⚙️ Функции → 🌐 Веб-панель)."""
     chat_id = target.from_user.id
     role = web_role(chat_id, await db.student_by_chat(chat_id))
-    if not web_allowed(role):
+    if not web_allowed(role, chat_id):
         text = ("Веб-панель выключена" if not config.WEB_PORT else
                 "Сначала выбери себя из списка группы: /start" if role is None else "Веб-панель для твоей роли пока закрыта")
         if isinstance(target, CallbackQuery):
