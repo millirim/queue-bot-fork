@@ -153,7 +153,7 @@ export function tabs(items, current, href) {
 
 // ---------- блоки ----------
 export function pageHead(title, { sub, actions, back } = {}) {
-  return h("header", { class: "page-head" },
+  return h("header", { class: "page-head" + (sub ? " has-sub" : "") },
     back ? h("a", { class: "back", href: back.href }, icon("back"), back.label) : null,
     h("div", { class: "page-title" },
       h("div", { class: "titles" }, h("h1", { text: title }), sub ? h("p", { class: "sub", text: sub }) : null),

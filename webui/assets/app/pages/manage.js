@@ -308,6 +308,7 @@ async function journal(el, _p, token) {
     newer.disabled = !ui.page;
     older.disabled = !data.more;
     fill(foot, newer, h("span", { class: "num faint small", text: `стр. ${ui.page + 1}` }), older);
+    foot.classList.toggle("hidden", !ui.page && !data.more);
   };
   const tabsEl = can("admin") ? segmented(JOURNAL_TABS, ui.tab, async (v) => { ui.tab = v; ui.page = 0; await draw(); }, { cls: "sm" }) : null;
   const trace = can("admin") ? moreButton([{ label: "Последняя ошибка", ic: "alert", onClick: async () => {

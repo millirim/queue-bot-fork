@@ -228,7 +228,9 @@ async function live(el, token) {
     chip(ui.onlyBad, "Проблемы", () => { ui.onlyBad = !ui.onlyBad; }),
     chip(ui.noise, "Фоновые", () => { ui.noise = !ui.noise; }),
     ui.rid ? chip(true, `запрос ${ui.rid} ✕`, () => { ui.rid = null; }) : null);
-  const pause = button("", { kind: "sm ghost", ic: "minus", title: "Пауза", onClick: () => { ui.paused = !ui.paused; pause.classList.toggle("on", ui.paused); if (!ui.paused) redraw(); } });
+  const pause = button("Пауза", { kind: "sm", onClick: () => {
+    ui.paused = !ui.paused; pause.classList.toggle("on", ui.paused); pause.querySelector(".lbl").textContent = ui.paused ? "Дальше" : "Пауза"; if (!ui.paused) redraw();
+  } });
 
   const onMessage = (msg) => {
     if (msg.type === "hello") { events = msg.events; series = msg.series; fmtSnap(msg.snapshot); drawChart(); redraw(); }
