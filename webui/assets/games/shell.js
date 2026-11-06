@@ -195,7 +195,7 @@
 
     const topup = button("Пополнить", { kind: "sm", onClick: () => send({ t: "topup" }) });
     fill(page,
-      pageHead("Игры", { sub: "Одиночные игры с рекордами группы и столы с друзьями. Игры работают отдельно от очереди: если что-то сломается, очередь это не заденет.", actions: [chipsPill, topup] }),
+      pageHead("Игры", { actions: [chipsPill, topup] }),
       banner, body);
     body.append(h("div", { class: "card" }, A.loadingCard ? A.loadingCard(2) : h("div", { class: "card-body", text: "Подключаюсь…" })));
     await connect();
