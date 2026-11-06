@@ -10,6 +10,9 @@
 ## Снимок «до»
 - Ветка `snapshot-before-ui-rewrite` на GitHub (коммит `dae03c6`, это `main` перед началом работы): старый интерфейс целиком, откат и сравнение — `git diff snapshot-before-ui-rewrite -- webui`.
 - Скриншоты старого вида — в той же ветке `snapshot-before-ui-rewrite` (`docs/screens/`); в `main` теперь новые.
+- **Архив старого интерфейса** — ветка `archive/old-ui` (последний `main` со старым видом, коммит `6769e72`): `webui/index.html`,
+  `webui/assets/app.js`, `webui/assets/app.css`, скриншоты в `docs/screens/`. Вернуть только старый интерфейс в текущую версию
+  (API не менялось): `git checkout origin/archive/old-ui -- webui/index.html webui/assets/app.js webui/assets/app.css`.
 - Рабочая ветка для переписывания: `ui-rewrite` (от `main`). Результат вливать в `main` частями через PR (squash), каждая часть — рабочая и с зелёными тестами.
 
 ## Принципы нового интерфейса
