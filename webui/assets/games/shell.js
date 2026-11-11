@@ -97,8 +97,8 @@
         const info = INFO[g.kind] || { desc: "", meta: "" };
         const best = g.solo && me && me.best && me.best[g.kind] ? `твой рекорд ${K.fmt(me.best[g.kind])}` : null;
         const main = g.solo
-          ? button("Играть", { kind: "primary", onClick: () => startSolo(g.kind) })
-          : button("Создать стол", { kind: "primary", onClick: () => createSheet(g) });
+          ? button("Играть", { onClick: () => startSolo(g.kind) })
+          : button("Создать стол", { onClick: () => createSheet(g) });
         main.dataset.act = g.solo ? "play" : "create";
         const board = h("button", { class: "gl-link", type: "button", onclick: () => send({ t: "board", kind: g.kind }) }, g.solo ? "Рекорды" : "Таблица");
         return h("article", { class: "gl-tile", "data-game": g.kind },
@@ -152,6 +152,7 @@
       const g = gameDef(kind) || { title: kind };
       const root = h("div", { class: `games-play games-${kind}` });
       head.classList.add("hidden");
+      document.body.classList.add("in-game");
       fill(body, bar(g.title, null, [button("Рекорды", { kind: "sm ghost", onClick: () => send({ t: "board", kind }) })], () => { cleanupGame(); send({ t: "lobby" }); showLobby(); }), root);
       if (!def) { root.append(h("p", { class: "muted", text: "Экран этой игры не загрузился. Обнови страницу." })); return; }
       lastSeed = null;

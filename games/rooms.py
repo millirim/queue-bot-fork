@@ -156,7 +156,8 @@ class Room:
                 raise GameError("Твои фишки ещё в прошлой раздаче — дождись её конца и садись")
             stack = int(self.options.get("buyin", 0)) if "buyin" in self.options else int(buyin or 0)
             if stack <= 0 or not await self.hub.store.hold(self.code, pid, stack):
-                raise GameError("Не хватает фишек для входа за стол")
+                have = await self.hub.store.balance(pid)
+                raise GameError(f"Не хватает фишек: вход {stack}, у тебя {have}. Пополнить можно в «Играх» — нажми на свой счёт")
             self.held += stack
             self.stakes[pid] = stack
         try:
