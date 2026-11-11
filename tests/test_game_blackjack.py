@@ -743,13 +743,14 @@ def test_player_below_min_bet_drops_out_and_table_ends_when_all_are_out():
     assert g.view(0)["players"][0]["hands"][0]["outcome"] == "lose"
     clock.adv(6.5)
     assert g.phase == "betting"
-    assert g.view(0)["players"][0]["status"] == "out" and "bet" not in g.legal(0)["actions"]
+    assert g.seat_of(100) is None and g.view(1)["host"] == 1   # на ставку не хватает: место освобождается
+    assert g.view(0)["me"] is None and g.legal(0)["actions"] == []
     with pytest.raises(GameError):
         g.act(0, {"a": "bet", "amount": 50})
+    assert g.take_returns() == {0: 40} and g.seats[0] is None   # остаток — ему сразу
+    assert g.add_player(100, "A", 200) == 0                    # и можно сесть заново с новым входом
+    assert "bet" in g.legal(0)["actions"] and g.chips_total() + g.house + 40 == 400
     g.act(1, {"a": "bet", "amount": 50})
-    stacked(g, [("Ts", "9d")], ("Tc", "Th"))
-    assert g.remove_player(100) == 40                   # остаток выбывшего — ему
-    assert g.view(1)["host"] == 1
 
 
 def test_everybody_without_chips_finishes_the_game():

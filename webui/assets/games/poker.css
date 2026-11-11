@@ -14,6 +14,7 @@
 .pk-below { align-content: start; }
 .pk-board { display: flex; gap: 4px; justify-content: center; }
 .pk-board .gk-card { --cw: var(--pk-board); }
+.pk-table[data-phase="lobby"] .pk-board { visibility: hidden; }
 .pk-slot { width: var(--pk-board); aspect-ratio: 5 / 7; border-radius: calc(var(--pk-board) * .13); border: 1.5px dashed var(--felt-line); }
 .pk-pot { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; border-radius: 99px; background: rgba(0, 0, 0, .32); font-size: 15px; }
 .pk-side { font-size: 12px; opacity: .75; font-variant-numeric: tabular-nums; }

@@ -191,6 +191,7 @@ class CheckersGame(Game):
     min_players = 2
     max_players = 2
     uses_chips = False
+    auto_start = True     # партия начинается, как только сел второй игрок
 
     OPTIONS = {
         "minutes": {"type": "int", "min": 0, "max": 60, "default": 0, "label": "Минут на партию (0 — без часов)"},

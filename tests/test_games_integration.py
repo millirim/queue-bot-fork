@@ -71,7 +71,7 @@ def test_chess_and_checkers_between_two_players(tmp_path):
             await a.send_json({"t": "create", "kind": "chess", "options": {"minutes": 5, "inc": 2}})
             code = (await until(a, "state"))["room"]["code"]
             await b.send_json({"t": "join", "room": code}); await until(b, "state")
-            await a.send_json({"t": "start"}); first = await state_where(a, lambda m: m["room"]["state"] == "playing")
+            first = await state_where(a, lambda m: m["room"]["state"] == "playing")   # сел второй — партия началась сама, без «Начать»
             assert first["view"]["legal"]["e2"] and "board" in first["view"], "белым показаны допустимые ходы"
             await a.send_json({"t": "act", "a": {"a": "move", "from": "e2", "to": "e4"}})
             after = await state_where(b, lambda m: m["view"].get("last_move"))
@@ -85,7 +85,7 @@ def test_chess_and_checkers_between_two_players(tmp_path):
             a, b = await connect(client, 3, "Вера"), await connect(client, 4, "Глеб")  # новые люди: Аня и Боря ещё числятся за законченным столом
             await a.send_json({"t": "create", "kind": "checkers"}); code = (await until(a, "state"))["room"]["code"]
             await b.send_json({"t": "join", "room": code}); await until(b, "state")
-            await a.send_json({"t": "start"}); await state_where(a, lambda m: m["room"]["state"] == "playing")
+            await state_where(a, lambda m: m["room"]["state"] == "playing")
             await a.send_json({"t": "act", "a": {"a": "move", "path": ["c3", "d4"]}})
             moved = await state_where(b, lambda m: m["view"].get("last_move"))
             assert moved["view"]["last_move"]["path"] == ["c3", "d4"]

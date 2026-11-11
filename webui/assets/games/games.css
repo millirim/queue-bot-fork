@@ -111,8 +111,10 @@
 .gt-sub { font-size: 13px; color: var(--text-3); white-space: nowrap; }
 .gt-acts { display: flex; gap: 6px; flex: none; }
 @media (max-width: 899px) {
-  body.in-game .topbar { display: none; }
-  body.in-game .main { padding-top: max(8px, env(safe-area-inset-top)); }
+  /* За столом на телефоне убираем шапку и нижние вкладки: всё место — игре. Назад — стрелкой в полоске стола. */
+  body.in-game .topbar, body.in-game .tabbar { display: none; }
+  body.in-game .main { padding-top: max(8px, env(safe-area-inset-top)); padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  body.in-game .toasts { bottom: calc(18px + env(safe-area-inset-bottom)); }
   .gl-tile { grid-template-columns: 84px minmax(0, 1fr); }
   .gl-art { width: 84px; height: 64px; }
 }

@@ -165,7 +165,7 @@
         top = h("div", { class: "pk-pot" }, K.chips(v.pot, "is-pot"), sidePots ? h("span", { class: "pk-side", text: v.pots.map((p) => fmt(p.amount)).join(" + ") }) : null);
         note = h("div", { class: "pk-note", text: STREET[v.phase] });
       } else if (r && (v.phase === "between" || v.phase === "waiting" || v.phase === "finished")) {
-        note = h("div", { class: "pk-result" }, awardLines(v));   // на телефоне итог виден в панели под столом, тут он скрыт стилями
+        top = h("div", { class: "pk-result" }, awardLines(v));   // на телефоне итог виден в панели под столом, тут он скрыт стилями
       }
       if (v.phase === "lobby") top = h("div", { class: "pk-note is-big", text: v.players.length < 2 ? "Ждём второго игрока" : "Все в сборе?" });
       if (v.phase === "waiting") top = h("div", { class: "pk-note is-big", text: "Ждём игроков" });

@@ -173,6 +173,10 @@ class Room:
         self.hub.seated[pid] = self
         conn.room = self
         self.watchers.discard(conn)
+        # Игры на двоих (шашки, шахматы) начинаются сами, как только сел второй: отдельная кнопка «Начать» там лишняя.
+        if self.state == "lobby" and getattr(self.game, "auto_start", False) and self.game.can_start():
+            self.game.start()
+            self.state = "playing"
 
     async def attach(self, conn: Conn) -> None:
         pid = conn.player.id
