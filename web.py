@@ -1208,7 +1208,7 @@ async def api_suggestion_add(request: web.Request) -> web.Response:
     reviewers = sorted((config.CREATOR_IDS | set(await db.staff_chats())) - {v.chat_id})
     await send_many(bot_of(request), reviewers,
                     f"💡 <b>Новое предложение</b> #{sid} ({who}, {where})\n\n{esc(text[:1500])}\n\n"
-                    "<i>Ответить — в веб-панели → Предложения.</i>")
+                    "<i>Ответить — в веб-панели → Идеи.</i>")
     return web.json_response(suggestion_json(await db.get_suggestion(sid, v.student.id if v.student else None), v))
 
 

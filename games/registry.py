@@ -9,27 +9,30 @@ log = logging.getLogger("games")
 
 # kind -> (модуль, класс, значок, одиночная ли, настройки стола)
 # Настройки: key, label, type (int|bool|choice), min/max/default или choices. Всё прочее от клиента отбрасывается.
+# presets — готовые варианты (экран показывает их кнопками вместо поля с числом), labels — подписи к значениям.
 _CLOCK = [
-    {"key": "minutes", "label": "Минут на партию (0 — без часов)", "type": "int", "min": 0, "max": 60, "default": 0},
-    {"key": "inc", "label": "Прибавка за ход, секунд", "type": "int", "min": 0, "max": 30, "default": 0},
+    {"key": "minutes", "label": "Часы", "type": "int", "min": 0, "max": 60, "default": 0, "presets": [0, 3, 5, 10, 15, 30],
+     "labels": {0: "без часов", 3: "3 мин", 5: "5 мин", 10: "10 мин", 15: "15 мин", 30: "30 мин"}},
+    {"key": "inc", "label": "Добавка за ход", "type": "int", "min": 0, "max": 30, "default": 0, "presets": [0, 2, 5, 10],
+     "labels": {0: "нет", 2: "+2 с", 5: "+5 с", 10: "+10 с"}},
 ]
 SPECS: dict[str, tuple[str, str, str, bool, list[dict]]] = {
     "2048": ("games.g2048", "Game2048", "2048", True, []),
     "snake": ("games.snake", "SnakeGame", "Змейка", True, []),
     "checkers": ("games.checkers", "CheckersGame", "Шашки", False, _CLOCK),
     "chess": ("games.chess", "ChessGame", "Шахматы", False, _CLOCK),
+    # Колод в шу — 6, крупье стоит на мягких 17: это настройки игры по умолчанию, в экран создания стола их не выносим.
     "blackjack": ("games.blackjack", "BlackjackGame", "21", False, [
-        {"key": "min_bet", "label": "Минимальная ставка", "type": "int", "min": 5, "max": 100, "default": 10},
-        {"key": "max_bet", "label": "Максимальная ставка", "type": "int", "min": 50, "max": 2000, "default": 500},
-        {"key": "decks", "label": "Колод в шу", "type": "choice", "choices": [1, 2, 4, 6, 8], "default": 6},
-        {"key": "h17", "label": "Крупье берёт на мягких 17", "type": "bool", "default": False},
-        {"key": "buyin", "label": "Вход, фишек", "type": "int", "min": 50, "max": 5000, "default": 500},
+        {"key": "buyin", "label": "Беру за стол", "type": "int", "min": 50, "max": 5000, "default": 500, "presets": [250, 500, 1000, 2000]},
+        {"key": "min_bet", "label": "Ставка от", "type": "int", "min": 5, "max": 100, "default": 10, "presets": [5, 10, 25, 50]},
+        {"key": "max_bet", "label": "Ставка до", "type": "int", "min": 50, "max": 2000, "default": 500, "presets": [100, 250, 500, 1000]},
     ]),
     "poker": ("games.poker", "PokerGame", "Покер", False, [
-        {"key": "small_blind", "label": "Малый блайнд", "type": "int", "min": 1, "max": 200, "default": 10},
-        {"key": "buyin", "label": "Вход, фишек", "type": "int", "min": 100, "max": 10000, "default": 1000},
-        {"key": "raise_blinds_every", "label": "Блайнды растут каждые N раздач (0 — нет)", "type": "choice", "choices": [0, 5, 10, 15, 20], "default": 0},
-        {"key": "turn_seconds", "label": "Секунд на ход", "type": "choice", "choices": [15, 30, 45, 60], "default": 30},
+        {"key": "buyin", "label": "Беру за стол", "type": "int", "min": 100, "max": 10000, "default": 1000, "presets": [500, 1000, 2000, 5000]},
+        {"key": "small_blind", "label": "Блайнды", "type": "int", "min": 1, "max": 200, "default": 10, "presets": [5, 10, 25, 50],
+         "labels": {5: "5 / 10", 10: "10 / 20", 25: "25 / 50", 50: "50 / 100"}},
+        {"key": "turn_seconds", "label": "Время на ход", "type": "choice", "choices": [15, 30, 45, 60], "default": 30,
+         "labels": {15: "15 с", 30: "30 с", 45: "45 с", 60: "минута"}},
     ]),
 }
 

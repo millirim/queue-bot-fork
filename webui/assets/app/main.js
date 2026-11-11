@@ -1,6 +1,6 @@
 // Вход в приложение: Telegram, вход, каркас (меню по ролям), маршруты, значки, тема.
 import { h, fill, icon, state, store, api, can, featureOn, leavePage, initials, nick, roleName, firstName } from "./core.js";
-import { button, sheet, segmented, toast, action, pageHead, closePopover, empty, skeleton } from "./ui.js";
+import { button, sheet, segmented, toggle, confirm, toast, action, pageHead, closePopover, empty, skeleton } from "./ui.js";
 import * as queue from "./pages/queue.js";
 import * as polls from "./pages/polls.js";
 import * as ideas from "./pages/ideas.js";
@@ -252,5 +252,6 @@ async function start() {
   else boot();
 }
 
-window.QB_APP = { h, fill, pageHead, button, toast, api, dialog: sheet, state, emptyState: empty, loadingCard: skeleton };
+// Помощники для экранов игр (webui/assets/games): они обычные скрипты и берут всё отсюда в момент открытия страницы.
+window.QB_APP = { h, fill, icon, pageHead, button, toast, api, sheet, dialog: sheet, confirm, segmented, toggle, state, emptyState: empty, loadingCard: skeleton };
 start();

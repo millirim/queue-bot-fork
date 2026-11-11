@@ -90,8 +90,11 @@ class Room:
 
     # --- что видят люди ---
     def public(self) -> dict:
+        limit = getattr(self.game, "max_players", 2)
+        joinable = (not self.closed and self.state != "done" and len(self.seat_of) < limit
+                    and (self.state == "lobby" or bool(getattr(self.game, "late_join", False))))
         return {"code": self.code, "kind": self.info.kind, "title": self.info.title, "state": self.state, "owner": self.names.get(self.owner_id, ""),
-                "players": len(self.seat_of), "max": getattr(self.game, "max_players", 2), "options": self.options}
+                "players": len(self.seat_of), "max": limit, "options": self.options, "joinable": joinable}
 
     async def broadcast(self) -> None:
         """Каждому — его вид состояния (закрытые карты только владельцам)."""
@@ -122,10 +125,25 @@ class Room:
         take = getattr(self.game, "take_returns", None)
         if take is None:
             return
-        for seat, amount in (take() or {}).items():
+        for seat, amount in (take() or {}).items():   # {место: 0} — игра освободила место, человеку больше ничего не причитается
             pid = self.pid_of.get(int(seat))
-            if pid is not None and int(amount) > 0:
+            if pid is not None and int(amount) >= 0:
                 await self.credit(pid, int(amount))
+
+    def reconcile(self) -> None:
+        """Игра сама убирает людей с мест (три пропуска хода, кончились фишки). Такие остаются за столом зрителями и могут сесть снова."""
+        for pid, seat in list(self.seat_of.items()):
+            if self.game.seat_of(pid) == seat:
+                continue
+            self.seat_of.pop(pid, None)
+            self.hub.seated.pop(pid, None)
+            self.gone_since.pop(pid, None)
+            conn = self.conns.pop(pid, None)
+            if conn is not None and not conn.dead:
+                self.watchers.add(conn)
+            self.hub.dirty = True
+        if self.owner_id not in self.seat_of and self.seat_of:
+            self.owner_id = next(iter(self.seat_of))
 
     # --- вход и выход ---
     async def join(self, conn: Conn, buyin: int | None) -> None:
@@ -134,9 +152,12 @@ class Room:
             return await self.attach(conn)
         stack = 0
         if self.info.uses_chips:
+            if await self.hub.store.held(self.code, pid):   # встал посреди раздачи и сразу садится: старый вклад ещё не рассчитан
+                raise GameError("Твои фишки ещё в прошлой раздаче — дождись её конца и садись")
             stack = int(self.options.get("buyin", 0)) if "buyin" in self.options else int(buyin or 0)
             if stack <= 0 or not await self.hub.store.hold(self.code, pid, stack):
-                raise GameError("Не хватает фишек для входа за стол")
+                have = await self.hub.store.balance(pid)
+                raise GameError(f"Не хватает фишек: вход {stack}, у тебя {have}. Пополнить можно в «Играх» — нажми на свой счёт")
             self.held += stack
             self.stakes[pid] = stack
         try:
@@ -153,6 +174,10 @@ class Room:
         self.hub.seated[pid] = self
         conn.room = self
         self.watchers.discard(conn)
+        # Игры на двоих (шашки, шахматы) начинаются сами, как только сел второй: отдельная кнопка «Начать» там лишняя.
+        if self.state == "lobby" and getattr(self.game, "auto_start", False) and self.game.can_start():
+            self.game.start()
+            self.state = "playing"
 
     async def attach(self, conn: Conn) -> None:
         pid = conn.player.id
@@ -165,12 +190,12 @@ class Room:
         self.watchers.discard(conn)
         if pid in self.seat_of:
             returned = self.game.remove_player(pid)
-            await self.collect_returns()
             if self.state == "lobby":
                 await self.credit(pid, self.stakes.get(pid, 0))  # игра не началась — возвращается ровно вложенное
             elif returned:
                 await self.credit(pid, returned)
-            # иначе остаток придёт в result()["payouts"] по месту, которое запомнено в pid_of
+            await self.collect_returns()   # после своей выплаты: запись «место свободно» не должна закрыть вклад раньше неё
+            # иначе остаток придёт позже через take_returns() или в result()["payouts"] по месту, которое запомнено в pid_of
             self.conns.pop(pid, None)
             self.gone_since.pop(pid, None)
             self.seat_of.pop(pid, None)
@@ -209,6 +234,7 @@ class Room:
                 started = time.perf_counter()
                 await coro_factory()
                 await self.collect_returns()
+                self.reconcile()
                 self.touched = time.monotonic()
                 if time.perf_counter() - started > SLOW_ACT_SECONDS:
                     self.strikes += 1
@@ -248,6 +274,7 @@ class Room:
                     if self.state == "playing":
                         changed = bool(self.game.tick(now))
                         await self.collect_returns()
+                        self.reconcile()
                         for pid, since in list(self.gone_since.items()):
                             if now - since > GRACE_SECONDS and pid in self.seat_of:
                                 self.conns.pop(pid, None)
@@ -255,6 +282,7 @@ class Room:
                                 returned = self.game.remove_player(pid)
                                 if returned:
                                     await self.credit(pid, returned)
+                                await self.collect_returns()
                                 self.seat_of.pop(pid, None)
                                 self.hub.seated.pop(pid, None)
                                 changed = True
@@ -277,7 +305,7 @@ class Room:
                     empty = not self.seat_of and not self.watchers
                     idle = now - self.touched > IDLE_SECONDS
                 if done or empty or idle:
-                    await self.close(refund=not done)
+                    await self.close(refund=not done, settle=True)
                     return
             except asyncio.CancelledError:
                 raise
@@ -286,10 +314,28 @@ class Room:
                 await self.crash()
                 return
 
-    async def close(self, refund: bool) -> None:
+    async def cash_out(self) -> None:
+        """Стол на фишки закрывается посреди игры (простой): каждый получает то, что у него сейчас в стеке, а не свой вход."""
+        for pid in list(self.seat_of):
+            returned = self.game.remove_player(pid)
+            if returned:
+                await self.credit(pid, returned)
+            await self.collect_returns()
+        result = (self.game.result() or {}) if self.game.finished else {}
+        for seat, amount in (result.get("payouts") or {}).items():
+            pid = self.pid_of.get(int(seat))
+            if pid is not None:
+                await self.credit(pid, int(amount))
+
+    async def close(self, refund: bool, settle: bool = False) -> None:
         if self.closed:
             return
         self.closed = True
+        if refund and settle and self.state == "playing" and self.info.uses_chips:
+            try:
+                await self.cash_out()
+            except Exception:  # игра сломана — ниже каждый получит свой вход обратно
+                log.exception("Стол %s (%s): расчёт при закрытии не удался, возвращаю вложенное", self.code, self.info.kind)
         if refund:
             await self.hub.store.refund_room(self.code)
         for conn in list(self.conns.values()) + list(self.watchers):

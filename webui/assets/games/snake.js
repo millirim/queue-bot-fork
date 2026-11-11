@@ -128,7 +128,7 @@
       h("div", { class: "snake-stats" }, stat("Счёт", scoreEl), stat("Рекорд", bestEl), stat("Длина", lenEl)),
       h("div", { class: "snake-bar" }, pauseBtn, restartBtn),
       boardEl,
-      h("p", { class: "snake-hint muted", text: "Стрелки или WASD, пробел — пауза. На телефоне — свайп по полю. Едите красное, не врезайтесь." }),
+      h("p", { class: "snake-hint muted", text: "Свайп по полю или стрелки. Пробел — пауза." }),
       padEl);
     root.replaceChildren(el);
     // после клика мышью или касанием кнопка не должна оставаться в фокусе: иначе пробел нажмёт её ещё раз, а на ней останется кольцо фокуса
@@ -229,7 +229,7 @@
       } else if (phase === "error") {
         cardEl.append(title("Игра недоступна"), line(errorText || "Не удалось начать партию."), btn("Повторить", () => begin()));
       } else if (phase === "ready") {
-        cardEl.append(title("Готовы?"), line("Стрелка, WASD или свайп по полю — и поехали."),
+        cardEl.append(title("Готов?"), line("Свайпни по полю или нажми стрелку."),
           btn("Поехали", () => input("R")));
       } else if (phase === "paused") {
         cardEl.append(title("Пауза"), line("Пробел или любая стрелка — продолжить."), btn("Продолжить", () => togglePause()));

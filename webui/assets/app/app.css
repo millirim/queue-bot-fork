@@ -32,7 +32,8 @@
   --tabbar: 0px;
   --font: Inter, "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-  --nick-starosta: #0b7a46; --nick-admin: #4b3fd1; --nick-glow: rgba(106, 107, 255, .28);
+  --nick-starosta: #0b7a46; --nick-admin: #4b3fd1;
+  --nick-c1: #dd5a2a; --nick-c2: #cf3f86; --nick-c3: #5a58e6; --nick-c4: #1590ae;
   color-scheme: light;
 }
 
@@ -44,7 +45,8 @@
     --ok: #4cc38a; --ok-soft: #12241a; --warn: #e2aa3d; --warn-soft: #29210f; --bad: #f2735f; --bad-soft: #2e1613;
     --info: #7aa7ee; --info-soft: #151f30; --focus: #ff6a2b;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 14px 36px rgba(0, 0, 0, .5); --overlay: rgba(0, 0, 0, .6);
-    --nick-starosta: #52d19a; --nick-admin: #a99cff; --nick-glow: rgba(140, 130, 255, .35);
+    --nick-starosta: #52d19a; --nick-admin: #a99cff;
+  --nick-c1: #ff9c70; --nick-c2: #ff86bd; --nick-c3: #aaa8ff; --nick-c4: #6adcee;
     color-scheme: dark;
   }
 }
@@ -55,7 +57,8 @@
   --ok: #4cc38a; --ok-soft: #12241a; --warn: #e2aa3d; --warn-soft: #29210f; --bad: #f2735f; --bad-soft: #2e1613;
   --info: #7aa7ee; --info-soft: #151f30; --focus: #ff6a2b;
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 14px 36px rgba(0, 0, 0, .5); --overlay: rgba(0, 0, 0, .6);
-  --nick-starosta: #52d19a; --nick-admin: #a99cff; --nick-glow: rgba(140, 130, 255, .35);
+  --nick-starosta: #52d19a; --nick-admin: #a99cff;
+  --nick-c1: #ff9c70; --nick-c2: #ff86bd; --nick-c3: #aaa8ff; --nick-c4: #6adcee;
   color-scheme: dark;
 }
 :root[data-theme="amoled"] {
@@ -65,7 +68,8 @@
   --ok: #4cc38a; --ok-soft: #0a1610; --warn: #e2aa3d; --warn-soft: #18130a; --bad: #f2735f; --bad-soft: #1c0d0b;
   --info: #7aa7ee; --info-soft: #0b1220; --focus: #ff6a2b;
   --shadow: 0 0 0 1px #1e1e22; --overlay: rgba(0, 0, 0, .78);
-  --nick-starosta: #52d19a; --nick-admin: #a99cff; --nick-glow: rgba(140, 130, 255, .35);
+  --nick-starosta: #52d19a; --nick-admin: #a99cff;
+  --nick-c1: #ff9c70; --nick-c2: #ff86bd; --nick-c3: #aaa8ff; --nick-c4: #6adcee;
   color-scheme: dark;
 }
 
@@ -624,15 +628,13 @@ button.vote:hover:not(:disabled) { border-color: var(--border-strong); color: va
   src: url("/assets/fonts/exo-2-latin-600-normal.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215; }
 .nick-starosta { color: var(--nick-starosta); font-weight: 600; }
 .nick-admin { color: var(--nick-admin); font-weight: 600; }
+/* Создатель: без рамки, переливается сам текст — мягкий градиент, который медленно плывёт. Цвета по теме: на светлом темнее, на тёмном светлее. */
 .nick-creator {
-  display: inline-block; font-family: "Exo 2", system-ui, sans-serif; font-weight: 600; letter-spacing: .015em; white-space: nowrap;
-  padding: 0 9px; border: 1.5px solid transparent; border-radius: 9px; color: var(--text);
-  background: linear-gradient(var(--surface), var(--surface)) padding-box,
-              linear-gradient(120deg, #ff8a3d, #e5489a, #6a6bff, #1fc7d8, #ff8a3d) border-box;
-  background-size: 100% 100%, 300% 100%; box-shadow: 0 0 12px var(--nick-glow);
-  animation: nick-flow 9s linear infinite;
+  font-family: "Exo 2", system-ui, sans-serif; font-weight: 600; letter-spacing: .012em; white-space: nowrap;
+  background: linear-gradient(90deg, var(--nick-c1), var(--nick-c2), var(--nick-c3), var(--nick-c4), var(--nick-c1)); background-size: 300% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent; -webkit-text-fill-color: transparent;
+  animation: nick-flow 14s linear infinite;
 }
-.q-row.me .nick-creator { background: linear-gradient(var(--brand-soft), var(--brand-soft)) padding-box, linear-gradient(120deg, #ff8a3d, #e5489a, #6a6bff, #1fc7d8, #ff8a3d) border-box; background-size: 100% 100%, 300% 100%; }
 
 /* ---------- совместимость для экранов игр (webui/assets/games) ---------- */
 .card-head { display: flex; align-items: center; gap: 8px 12px; padding: 14px 18px; border-bottom: 1px solid var(--border); flex-wrap: wrap; min-width: 0; }
@@ -661,7 +663,7 @@ button.list-row:hover { background: var(--surface-2); }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
 @keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
 @keyframes shimmer { to { background-position: -200% 0; } }
-@keyframes nick-flow { to { background-position: 0 0, 300% 0; } }
+@keyframes nick-flow { to { background-position: 300% 0; } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }

@@ -1,344 +1,257 @@
 // Экран «21» (блэкджек) на игровые фишки. Правила проверяет сервер игр; здесь только рисуем view и отправляем действия.
-// Данные людей (имена) вставляются как текст, без innerHTML; стили — только из blackjack.css и через el.style (CSP).
+// Сверху крупье, ниже игроки со своими руками, под столом — панель: ставка фишками, потом «Ещё / Хватит».
 (function () {
   "use strict";
-
-  const SUIT = { s: "♠\ufe0e", h: "♥\ufe0e", d: "♦\ufe0e", c: "♣\ufe0e" };   // U+FE0E: масть текстом, не картинкой
-  const SUIT_NAME = { s: "пик", h: "червей", d: "бубен", c: "треф" };
-  const RANK_NAME = { A: "туз", K: "король", Q: "дама", J: "валет", T: "десятка" };
-  const MINUS = "−";
-  const QUICK_CHIPS = [10, 25, 50, 100, 250, 500, 1000];
-
-  const STATUS = {
-    waiting: "Ждёт", thinking: "Выбирает ставку", bet: "Ставка сделана", idle: "Ждёт раунда", insuring: "Страховка",
-    playing: "Ходит", done: "Закончил", out: "Нет фишек", left: "Вышел",
-  };
-  const OUTCOME = { blackjack: "Блэкджек", win: "Выигрыш", push: "Ничья", lose: "Проигрыш", bust: "Перебор" };
+  const K = window.QB_KIT;
+  const { h, fmt, signed, clamp } = K;
+  const CHIPS = [5, 10, 25, 50, 100, 500];
+  const OUTCOME = { blackjack: "Блэкджек", win: "Выигрыш", push: "Ровно", lose: "Проигрыш", bust: "Перебор" };
   const OUTCOME_CLASS = { blackjack: "is-bj", win: "is-win", push: "is-push", lose: "is-lose", bust: "is-lose" };
 
-  function localH(tag, props, ...kids) {
-    const el = document.createElement(tag);
-    if (props) {
-      for (const [k, v] of Object.entries(props)) {
-        if (v === undefined || v === null || v === false) continue;
-        if (k === "class") el.className = v;
-        else if (k === "text") el.textContent = v;
-        else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-        else if (k === "value") el.value = v;
-        else el.setAttribute(k, v === true ? "" : v);
-      }
-    }
-    for (const kid of kids.flat(Infinity)) {
-      if (kid === null || kid === undefined || kid === false) continue;
-      el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-    }
-    return el;
-  }
-
-  const fmt = (n) => Number(n || 0).toLocaleString("ru-RU");
-  const signed = (n) => (n > 0 ? "+" + fmt(n) : n < 0 ? MINUS + fmt(-n) : "0");
-  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-
   function render(root, api) {
-    const h = api.h || localH;
     const toast = typeof api.toast === "function" ? api.toast : () => {};
     let state = null;
-    let betValue = 0;
-    let controlsSig = "";
-    let busy = false;
-    let busyTimer = 0;
-    let endArmed = 0;
+    let dockSig = "";
+    let bet = 0;                 // ставка, которую сейчас собираем фишками
+    let lastBet = 0;             // прошлая ставка — её предлагаем повторить
+    let stopTimer = () => {};
     let seen = new Set();
     let seenRound = -1;
-    let timer = null;            // { end, total, kind } — отсчёт идёт на клиенте от присланных секунд
+    let wasMyTurn = false;
 
-    const el = {
-      top: h("div", { class: "blackjack-top" }),
-      timer: h("div", { class: "blackjack-timer is-hidden", role: "timer" }),
-      fill: h("div", { class: "blackjack-timer-fill" }),
-      timerText: h("span", { class: "blackjack-timer-text" }),
-      felt: h("div", { class: "blackjack-felt" }),
-      controls: h("div", { class: "blackjack-controls" }),
-      log: h("ol", { class: "blackjack-log", "aria-label": "Последние действия" }),
-    };
-    el.timer.append(el.fill, el.timerText);
-    const wrap = h("div", { class: "blackjack" }, el.top, el.timer, el.felt, el.controls, h("div", { class: "blackjack-logbox" }, h("div", { class: "blackjack-label" }, "Последние действия"), el.log));
+    const el = { table: h("div", { class: "bj-table" }), dock: h("div", { class: "bj-dock" }), foot: h("div", { class: "bj-foot" }) };
+    const wrap = h("div", { class: "bj" }, el.table, el.dock, el.foot);
+    const lock = K.lockable(wrap);
     root.replaceChildren(wrap);
-    el.felt.append(h("div", { class: "blackjack-banner" }, "Подключаемся к столу..."));
 
-    // ---------- отправка ----------
-    function unlock() {
-      busy = false;
-      clearTimeout(busyTimer);
-      wrap.classList.remove("is-busy");
-    }
     function send(action) {
-      if (busy) return;
-      busy = true;
-      wrap.classList.add("is-busy");
-      busyTimer = setTimeout(unlock, 2500);       // если ответа об ошибке не пришло, кнопки не должны зависнуть
-      try {
-        const res = api.send(action);
-        if (res && typeof res.catch === "function") res.catch((e) => { unlock(); toast(String((e && e.message) || e), true); });
-      } catch (e) {
-        unlock();
-        toast(String((e && e.message) || e), true);
+      if (lock.busy) return;
+      lock.lock();
+      try { api.send(action); } catch (e) { lock.unlock(); toast(String((e && e.message) || e), true); }
+    }
+    const mine = (v) => (v.me === null || v.me === undefined ? null : v.players.find((p) => p.seat === v.me) || null);
+    const first = (name) => K.shortName(name).split(" ")[0];
+    const track = (key) => { const fresh = !seen.has(key); seen.add(key); return fresh; };
+    const totalText = (hand) => (hand.natural ? "21" : hand.soft && hand.total <= 21 ? (hand.total - 10) + " / " + hand.total : String(hand.total));
+
+    // ---------- стол ----------
+    function cardsRow(cards, prefix, cls) {
+      return h("div", { class: "bj-cards " + (cls || "") }, cards.map((c, i) => K.card(c, { fresh: track(prefix + ":" + i + ":" + (c || "x")) })));
+    }
+
+    function dealerNode(v) {
+      const d = v.dealer || { cards: [] };
+      let badge = null;
+      if (d.cards && d.cards.length) {
+        const text = d.bust ? "перебор" : d.natural ? "блэкджек" : d.hidden ? String(d.total) : (d.soft ? (d.total - 10) + " / " + d.total : String(d.total));
+        badge = h("span", { class: "bj-total" + (d.bust ? " is-bust" : d.natural ? " is-bj" : ""), text });
       }
+      return h("div", { class: "bj-dealer" },
+        h("div", { class: "bj-dealer-head" }, h("span", { class: "bj-label", text: "Крупье" }), badge),
+        d.cards && d.cards.length ? cardsRow(d.cards, "d") : h("div", { class: "bj-cards is-empty" }, h("span", { class: "bj-slot" }), h("span", { class: "bj-slot" })));
     }
 
-    // ---------- карты ----------
-    function cardNode(card, isNew) {
-      if (!card) {
-        return h("div", { class: "blackjack-card is-back" + (isNew ? " is-new" : ""), role: "img", "aria-label": "Закрытая карта" }, h("div", { class: "blackjack-card-back" }));
-      }
-      const rank = card[0] === "T" ? "10" : card[0];
-      const suit = SUIT[card[1]] || "?";
-      const red = card[1] === "h" || card[1] === "d";
-      const label = (RANK_NAME[card[0]] || card[0]) + " " + (SUIT_NAME[card[1]] || "");
-      return h("div", { class: "blackjack-card " + (red ? "is-red" : "is-black") + (isNew ? " is-new" : ""), role: "img", "aria-label": label },
-        h("span", { class: "blackjack-card-corner" }, h("b", null, rank), h("i", null, suit)),
-        h("span", { class: "blackjack-card-pip" }, suit),
-        h("span", { class: "blackjack-card-corner is-bottom" }, h("b", null, rank), h("i", null, suit)));
-    }
-    function cardsRow(cards, prefix) {
-      return h("div", { class: "blackjack-cards" }, (cards || []).map((c, i) => {
-        const key = prefix + ":" + i + ":" + (c || "?");
-        const isNew = !seen.has(key);
-        seen.add(key);
-        return cardNode(c, isNew);
-      }));
+    function handNode(hand, p, index, v) {
+      const active = v.phase === "playing" && v.turn === p.seat && p.active_hand === index;
+      const badge = hand.outcome
+        ? h("span", { class: "bj-out " + (OUTCOME_CLASS[hand.outcome] || ""), text: OUTCOME[hand.outcome] || hand.outcome })
+        : h("span", { class: "bj-total" + (hand.total > 21 ? " is-bust" : hand.natural ? " is-bj" : ""), text: hand.total > 21 ? "перебор" : totalText(hand) });
+      return h("div", { class: "bj-hand" + (active ? " is-active" : "") + (hand.outcome ? " " + (OUTCOME_CLASS[hand.outcome] || "") : "") },
+        cardsRow(hand.cards, "p" + p.seat + ":" + index, hand.cards.length > 3 ? "is-tight" : ""),
+        h("div", { class: "bj-hand-info" }, badge, K.chips(hand.bet, hand.doubled ? "is-double" : "")));
     }
 
-    // ---------- части экрана ----------
-    function me(v) { return v.me === null || v.me === undefined ? null : v.players.find((p) => p.seat === v.me) || null; }
-    function nameOf(v, seat) { const p = v.players.find((x) => x.seat === seat); return p ? p.name : "игрок"; }
+    function seatNode(p, v) {
+      const isMe = p.seat === v.me;
+      const turn = v.phase === "playing" && v.turn === p.seat;
+      const hands = (p.hands || []).map((hand, i) => handNode(hand, p, i, v));
+      let under = null;
+      if (v.phase === "result" && (p.hands || []).length) under = h("span", { class: "bj-net " + (p.net > 0 ? "is-win" : p.net < 0 ? "is-lose" : ""), text: p.net === 0 ? "при своих" : signed(p.net) });
+      else if (v.phase === "betting") under = p.bet > 0 ? h("span", { class: "bj-net is-bet" }, K.chips(p.bet)) : p.status === "thinking" ? h("span", { class: "bj-net is-wait", text: "ставит…" }) : null;
+      else if (p.status === "insuring") under = h("span", { class: "bj-net is-wait", text: "страховка?" });
+      else if (p.status === "idle") under = h("span", { class: "bj-net is-wait", text: "пропускает" });
+      else if (p.insurance > 0) under = h("span", { class: "bj-net is-wait", text: "страховка " + fmt(p.insurance) });
+      return h("div", { class: "bj-seat" + (isMe ? " is-me" : "") + (turn ? " is-turn" : "") + (p.status === "left" ? " is-gone" : ""), "data-seat": p.seat },
+        h("div", { class: "bj-hands" }, hands.length ? hands : h("div", { class: "bj-hand is-empty" })),
+        h("div", { class: "bj-plate" }, K.avatar(p.name, "bj-avatar"),
+          h("div", { class: "bj-who" }, h("span", { class: "bj-name", text: isMe ? "Ты" : first(p.name) }), K.chips(p.stack))),
+        under);
+    }
 
-    function drawTop(v) {
-      const o = v.options || {};
-      const pills = [
-        h("span", { class: "blackjack-pill" }, "Ставки " + fmt(o.min_bet) + "–" + fmt(o.max_bet)),
-        h("span", { class: "blackjack-pill" }, "Колод: " + (o.decks || 6)),
-        h("span", { class: "blackjack-pill", title: "Правило крупье" }, o.h17 ? "Крупье берёт на мягких 17" : "Крупье стоит на всех 17"),
-      ];
-      const shoe = v.shoe || { left: 0, total: 0 };
-      const pct = shoe.total ? clamp(Math.round((shoe.left / shoe.total) * 100), 0, 100) : 0;
-      const shoeEl = h("span", { class: "blackjack-shoe", title: "Карт осталось в шу: " + shoe.left + " из " + shoe.total },
-        h("span", { class: "blackjack-shoe-bar" }, h("span", { class: "blackjack-shoe-fill" })),
-        h("span", { class: "blackjack-shoe-text" }, "Шу " + pct + "%"));
-      shoeEl.querySelector(".blackjack-shoe-fill").style.width = pct + "%";
-      el.top.replaceChildren(
-        h("div", { class: "blackjack-title" }, h("span", { class: "blackjack-suit" }, SUIT.s), h("h2", null, "21"), v.round ? h("span", { class: "blackjack-round" }, "раунд " + v.round) : null),
-        h("div", { class: "blackjack-meta" }, pills, shoe.total ? shoeEl : null),
-        h("button", { class: "blackjack-btn is-ghost is-small", type: "button", onclick: () => api.leave && api.leave() }, "Выйти из-за стола"));
+    function noteText(v) {
+      if (v.phase === "lobby") return "Садитесь, сейчас начнём";
+      if (v.phase === "betting") return "Ставки";
+      if (v.phase === "insurance") return "У крупье туз. Страхуемся?";
+      if (v.phase === "finished") return v.summary || "Стол закрыт";
+      return "";
+    }
+
+    function drawTable(v) {
+      const note = noteText(v);
+      el.table.replaceChildren(dealerNode(v),
+        h("div", { class: "bj-mid" }, note ? h("span", { class: "bj-note", text: note }) : null, h("div", { class: "bj-bar" }, h("i"))),
+        h("div", { class: "bj-seats", "data-n": String(v.players.length) }, v.players.slice().sort((a, b) => a.seat - b.seat).map((p) => seatNode(p, v))));
+      el.table.dataset.phase = v.phase;
     }
 
     function drawTimer(v) {
+      stopTimer();
       const t = v.timer;
-      if (!t || !(t.total > 0)) { timer = null; el.timer.classList.add("is-hidden"); return; }
-      timer = { end: performance.now() + t.left * 1000, total: t.total, kind: t.kind };
-      el.timer.classList.remove("is-hidden");
-      paintTimer();
-    }
-    function timerLabel(v, kind) {
-      if (kind === "bet") return "Время на ставку";
-      if (kind === "insurance") return "Время на страховку";
-      if (kind === "next") return "Следующий раунд";
-      if (kind === "turn") return v.turn === v.me && v.me !== null ? "Твой ход" : "Ходит " + nameOf(v, v.turn);
-      return "";
-    }
-    function paintTimer() {
-      if (!timer || !state) return;
-      const left = Math.max(0, (timer.end - performance.now()) / 1000);
-      el.fill.style.width = clamp((left / timer.total) * 100, 0, 100) + "%";
-      el.fill.classList.toggle("is-low", left < 6 && timer.kind !== "next");
-      el.timerText.textContent = timerLabel(state, timer.kind) + " · " + Math.ceil(left) + " с";
-    }
-    const timerId = setInterval(paintTimer, 200);
-
-    function bannerText(v) {
-      const mine = me(v);
-      switch (v.phase) {
-        case "lobby": return mine && v.host === v.me ? "Все за столом? Нажми «Начать игру»" : "Ждём, пока хозяин стола начнёт игру";
-        case "betting":
-          if (mine && v.actions.includes("bet")) return mine.bet > 0 ? "Ставка принята: можно изменить, пока ставят остальные" : "Сделай ставку";
-          return mine && mine.status === "out" ? "У тебя не хватает фишек на ставку" : "Игроки делают ставки";
-        case "insurance": return mine && v.actions.includes("insurance") ? "У крупье туз. Страховка?" : "У крупье туз: идёт страховка";
-        case "playing": return v.turn === v.me && v.me !== null ? "Твой ход" : "Ходит " + nameOf(v, v.turn);
-        case "result": return v.ending ? "Раунд завершён. Игра закончится после него" : "Раунд завершён";
-        case "finished": return v.summary || "Игра окончена";
-        default: return "";
-      }
+      const bar = el.table.querySelector(".bj-bar");
+      const fill = bar && bar.firstChild;
+      if (bar) bar.classList.toggle("is-on", !!t);
+      if (!t) return;
+      const ring = t.kind === "turn" ? el.table.querySelector(".bj-seat.is-turn .bj-avatar") : null;
+      const secs = el.dock.querySelector(".bj-secs");
+      stopTimer = K.countdown(t, (left, share) => {
+        if (fill) fill.style.width = (share * 100).toFixed(1) + "%";
+        if (ring) { ring.style.setProperty("--p", share.toFixed(3)); ring.classList.toggle("is-low", left < 6); }
+        if (secs) secs.textContent = Math.ceil(left) + " с";
+      });
     }
 
-    function dealerBlock(v) {
-      const d = v.dealer || { cards: [] };
-      let totalText = null;
-      if (d.cards.length) totalText = d.hidden ? d.total + " + ?" : d.bust ? "Перебор " + d.total : String(d.total) + (d.soft ? " (мягкие)" : "");
-      return h("div", { class: "blackjack-dealer" },
-        h("div", { class: "blackjack-label" }, "Крупье"),
-        d.cards.length ? cardsRow(d.cards, "d") : h("div", { class: "blackjack-empty" }, "карты ещё не сданы"),
-        h("div", { class: "blackjack-meta-row" },
-          totalText ? h("span", { class: "blackjack-total" + (d.bust ? " is-bust" : "") }, totalText) : null,
-          d.natural ? h("span", { class: "blackjack-badge is-bj" }, "Блэкджек") : null));
+    // ---------- панель ----------
+    function btn(text, onclick, cls, attrs) {
+      return h("button", Object.assign({ class: "bj-btn " + (cls || ""), type: "button", onclick }, attrs || {}), text);
+    }
+    const hint = (text, extra) => h("div", { class: "bj-hint" }, h("span", { text }), extra || null);
+
+    function betPanel(v, m) {
+      const lo = v.bet_min, hi = Math.min(v.bet_max, m.stack + (m.bet || 0));
+      if (!bet) bet = clamp(lastBet || lo, lo, hi);
+      bet = clamp(bet, lo, hi);
+      const amount = h("b", { class: "bj-bet-amount", text: fmt(bet) });
+      const go = btn("", () => { lastBet = bet; send({ a: "bet", amount: bet }); }, "is-primary", { "data-act": "bet" });
+      const paint = () => { amount.textContent = fmt(bet); go.textContent = "Поставить " + fmt(bet); };
+      const set = (n) => { bet = clamp(Math.round(n), lo, hi); paint(); };
+      const chips = CHIPS.filter((c) => c <= hi && c >= Math.min(lo, 5)).slice(-5).map((c) => {
+        const b = h("button", { class: "bj-chip", type: "button", title: "Добавить " + c, onclick: () => set(bet === lo && fresh ? c : bet + c) }, String(c));
+        b.dataset.v = String(c);
+        return b;
+      });
+      let fresh = true;   // первая фишка заменяет минимальную ставку, следующие прибавляются
+      chips.forEach((b) => b.addEventListener("click", () => { fresh = false; }));
+      paint();
+      return [
+        h("div", { class: "bj-turn" }, h("b", { text: "Твоя ставка" }), h("span", { class: "bj-muted", text: "от " + fmt(lo) + " до " + fmt(hi) }), h("span", { class: "bj-secs" })),
+        h("div", { class: "bj-betrow" }, h("div", { class: "bj-chiprow" }, chips),
+          h("div", { class: "bj-bet-box" }, amount, h("button", { class: "bj-link", type: "button", onclick: () => { fresh = true; set(lo); } }, "сброс"))),
+        h("div", { class: "bj-actions" }, btn("Всё · " + fmt(hi), () => set(hi), ""), btn("×2", () => set(bet * 2), ""), go),
+      ];
     }
 
-    function handBlock(p, hand, idx, activeIdx, v) {
-      const showOutcome = !!hand.outcome && (v.phase === "result" || v.phase === "finished");
-      const net = hand.payout - hand.bet;
-      const totalText = hand.cards.length ? String(hand.total) + (hand.soft && !hand.done ? " (мягкие)" : "") : "";
-      return h("div", { class: "blackjack-hand" + (activeIdx === idx ? " is-active" : "") + (showOutcome ? " " + (OUTCOME_CLASS[hand.outcome] || "") : "") },
-        cardsRow(hand.cards, "p" + p.seat + ":" + idx),
-        h("div", { class: "blackjack-meta-row" },
-          totalText ? h("span", { class: "blackjack-total" + (hand.total > 21 ? " is-bust" : "") }, totalText) : null,
-          h("span", { class: "blackjack-chip", title: "Ставка на руку" }, fmt(hand.bet)),
-          hand.doubled ? h("span", { class: "blackjack-badge" }, "Удвоено") : null,
-          showOutcome ? h("span", { class: "blackjack-badge " + (OUTCOME_CLASS[hand.outcome] || "") }, (hand.forfeit ? "Вышел" : OUTCOME[hand.outcome] || hand.outcome) + " " + signed(net)) : null));
-    }
-
-    function seatBlock(p, v) {
-      const isMe = p.seat === v.me;
-      const isTurn = v.phase === "playing" && v.turn === p.seat;
-      const pre = v.phase === "betting" || v.phase === "lobby";
-      const showNet = (v.phase === "result" || v.phase === "finished") && p.hands.length > 0;
-      const card = h("div", { class: "blackjack-seat" + (isMe ? " is-me" : "") + (isTurn ? " is-turn" : "") + (p.status === "left" || p.status === "out" ? " is-gone" : ""), "data-seat": p.seat },
-        h("div", { class: "blackjack-seat-head" },
-          h("span", { class: "blackjack-name" }, p.name, isMe ? h("em", null, "ты") : null, v.host === p.seat ? h("small", { title: "Хозяин стола" }, "хозяин") : null),
-          h("span", { class: "blackjack-stack", title: "Фишки" }, fmt(p.stack))),
-        h("div", { class: "blackjack-seat-sub" },
-          h("span", { class: "blackjack-status is-" + p.status }, isTurn ? "Ходит" : STATUS[p.status] || p.status),
-          pre && p.bet > 0 ? h("span", { class: "blackjack-chip", title: "Ставка" }, fmt(p.bet)) : null,
-          p.insurance > 0 ? h("span", { class: "blackjack-badge", title: "Страховка" }, "Страховка " + fmt(p.insurance)) : null,
-          showNet ? h("span", { class: "blackjack-net " + (p.net > 0 ? "is-win" : p.net < 0 ? "is-lose" : "is-push") }, "Итог " + signed(p.net)) : null),
-        p.hands.length ? h("div", { class: "blackjack-hands" }, p.hands.map((hand, idx) => handBlock(p, hand, idx, p.active_hand, v))) : null);
-      return card;
-    }
-
-    function drawFelt(v) {
-      const n = v.players.length;
-      const mine = me(v);
-      let myResult = null;
-      if (mine && (v.phase === "result" || v.phase === "finished") && mine.hands.length) {
-        myResult = h("div", { class: "blackjack-result " + (mine.net > 0 ? "is-win" : mine.net < 0 ? "is-lose" : "is-push") },
-          mine.net > 0 ? "Ты выиграл " + fmt(mine.net) : mine.net < 0 ? "Ты проиграл " + fmt(-mine.net) : "Ничья: ставка возвращена");
-      }
-      el.felt.replaceChildren(...[
-        dealerBlock(v),
-        h("div", { class: "blackjack-banner", "aria-live": "polite" }, bannerText(v)),
-        myResult,
-        n ? h("div", { class: "blackjack-seats", "data-n": n }, v.players.map((p, i) => seatBlock(p, v))) : h("div", { class: "blackjack-empty" }, "За столом пока никого")].filter(Boolean));
-    }
-
-    // ---------- управление ----------
-    function btn(text, onclick, cls, extra) {
-      return h("button", Object.assign({ class: "blackjack-btn " + (cls || ""), type: "button", onclick }, extra || {}), text);
-    }
-
-    function betControls(v, mine) {
-      const lo = v.bet_min;
-      const hi = Math.max(lo, Math.min(v.bet_max, mine.stack + mine.bet));
-      betValue = clamp(betValue || mine.bet || lo, lo, hi);
-      const value = h("div", { class: "blackjack-betvalue" }, h("small", null, "Ставка"), h("b", null, fmt(betValue)));
-      const range = h("input", { class: "blackjack-range", type: "range", min: lo, max: hi, step: 1, value: betValue, "aria-label": "Размер ставки" });
-      const input = h("input", { class: "blackjack-number", type: "number", inputmode: "numeric", min: lo, max: hi, value: betValue, "aria-label": "Ставка числом" });
-      const submit = btn("Поставить " + fmt(betValue), () => send({ a: "bet", amount: betValue }), "is-primary is-big");
-      function set(n) {
-        betValue = clamp(Math.round(Number(n) || lo), lo, hi);
-        value.querySelector("b").textContent = fmt(betValue);
-        range.value = betValue;
-        input.value = betValue;
-        submit.textContent = (mine.bet > 0 ? "Изменить ставку на " : "Поставить ") + fmt(betValue);
-      }
-      range.addEventListener("input", () => set(range.value));
-      input.addEventListener("input", () => { if (input.value !== "") set(input.value); });
-      input.addEventListener("change", () => set(input.value));
-      const chips = QUICK_CHIPS.filter((c) => c <= hi).map((c) => btn("+" + c, () => set(betValue + c), "is-chip"));
-      set(betValue);
-      return h("div", { class: "blackjack-betui" },
-        h("div", { class: "blackjack-betrow" }, value, h("div", { class: "blackjack-betinputs" }, range, input)),
-        h("div", { class: "blackjack-chips" }, btn("Мин", () => set(lo), "is-chip"), chips, btn("Макс", () => set(hi), "is-chip")),
-        submit);
-    }
-
-    function controlsFor(v) {
-      const mine = me(v);
+    function dockFor(v) {
+      const m = mine(v);
       const acts = v.actions || [];
-      const isHost = mine !== null && v.host === v.me;
-      const parts = [];
-      if (v.phase === "lobby" && acts.includes("start")) parts.push(btn("Начать игру", () => send({ a: "start" }), "is-primary is-big"));
-      else if (v.phase === "lobby") parts.push(h("p", { class: "blackjack-hint" }, "Игра ещё не началась."));
-      if (v.phase === "betting" && acts.includes("bet") && mine) parts.push(betControls(v, mine));
-      if (v.phase === "insurance" && acts.includes("insurance")) {
-        parts.push(h("div", { class: "blackjack-actions is-two" },
-          btn("Страховка " + fmt(v.max_insurance), () => send({ a: "insurance", amount: v.max_insurance }), "is-primary is-big"),
-          btn("Без страховки", () => send({ a: "insurance", amount: 0 }), "is-big")));
-        parts.push(h("p", { class: "blackjack-hint" }, "Страховка до половины ставки платит 2 к 1, если у крупье блэкджек."));
+      if (v.me === null || v.me === undefined) {
+        if (v.phase === "finished") return [hint("Стол закрыт.")];
+        const free = v.players.filter((p) => p.status !== "left").length < 6;
+        return [hint("Ты смотришь игру.", free ? btn("Сесть за стол · " + fmt((v.options || {}).buyin || 0), () => api.sit && api.sit(), "is-primary", { "data-act": "sit" }) : h("span", { class: "bj-muted", text: "Мест нет" }))];
       }
-      if (v.phase === "playing" && v.turn === v.me && v.me !== null) {
-        parts.push(h("div", { class: "blackjack-actions" },
-          btn("Ещё", () => send({ a: "hit" }), "is-primary is-big", acts.includes("hit") ? {} : { disabled: true }),
-          btn("Хватит", () => send({ a: "stand" }), "is-big", acts.includes("stand") ? {} : { disabled: true }),
-          btn("Удвоить", () => send({ a: "double" }), "is-big", acts.includes("double") ? {} : { disabled: true }),
-          btn("Разделить", () => send({ a: "split" }), "is-big", acts.includes("split") ? {} : { disabled: true })));
+      if (v.phase === "lobby") {
+        if (acts.includes("start")) return [h("div", { class: "bj-actions is-one" }, btn("Начать игру", () => send({ a: "start" }), "is-primary", { "data-act": "start" }))];
+        const host = v.players.find((p) => p.seat === v.host);
+        return [hint("Ждём, когда " + (host ? first(host.name) : "хозяин стола") + " начнёт.")];
       }
-      if (v.me === null && v.phase !== "finished") parts.push(h("p", { class: "blackjack-hint" }, "Ты наблюдаешь за столом."));
-      if (isHost && acts.includes("end")) {
-        const endBtn = btn("Завершить игру", () => {
-          if (Date.now() - endArmed < 4000) { endArmed = 0; send({ a: "end" }); return; }
-          endArmed = Date.now();
-          endBtn.textContent = "Точно завершить? Нажми ещё раз";
-          setTimeout(() => { if (endBtn.isConnected) { endBtn.textContent = "Завершить игру"; endArmed = 0; } }, 4000);
-        }, "is-ghost is-small");
-        parts.push(h("div", { class: "blackjack-footer" }, endBtn, h("span", { class: "blackjack-hint" }, "Ты хозяин стола: можешь закончить игру после раунда.")));
+      if (v.phase === "finished") return [hint(v.summary || "Стол закрыт.")];
+      if (v.phase === "betting") {
+        if (m && m.bet > 0) return [hint("Ставка " + fmt(m.bet) + " принята. Ждём остальных.", h("span", { class: "bj-secs" }))];
+        if (acts.includes("bet") && m) return betPanel(v, m);
+        return [hint("Идут ставки.")];
       }
-      return parts;
+      if (v.phase === "insurance") {
+        if (acts.includes("insurance")) {
+          const max = v.max_insurance;
+          return [h("div", { class: "bj-turn" }, h("b", { text: "Страховка" }), h("span", { class: "bj-muted", text: "если у крупье блэкджек — вернёт ставку" }), h("span", { class: "bj-secs" })),
+            h("div", { class: "bj-actions" }, btn("Не надо", () => send({ a: "insurance", amount: 0 }), "", { "data-act": "noins" }),
+              max > 0 ? btn("Застраховать · " + fmt(max), () => send({ a: "insurance", amount: max }), "is-primary") : null)];
+        }
+        return [hint("Игроки решают про страховку.")];
+      }
+      if (v.phase === "playing") {
+        if (v.turn === v.me && m) {
+          const hand = (m.hands || [])[m.active_hand] || {};
+          const row = [btn("Ещё", () => send({ a: "hit" }), "", { "data-act": "hit" }), btn("Хватит", () => send({ a: "stand" }), "is-primary", { "data-act": "stand" })];
+          const extra = [];
+          if (acts.includes("double")) extra.push(btn("Удвоить", () => send({ a: "double" }), "is-small", { title: "Ставка ×2 и ровно одна карта" }));
+          if (acts.includes("split")) extra.push(btn("Разделить", () => send({ a: "split" }), "is-small", { title: "Две одинаковые карты — в две руки" }));
+          return [h("div", { class: "bj-turn" }, h("b", { text: "Твой ход" }),
+            h("span", { class: "bj-myhand", text: (m.hands.length > 1 ? "рука " + (m.active_hand + 1) + " · " : "") + (hand.total !== undefined ? totalText(hand) : "") }), h("span", { class: "bj-secs" })),
+          extra.length ? h("div", { class: "bj-actions is-extra" }, extra) : null,
+          h("div", { class: "bj-actions" }, row)];
+        }
+        const who = v.players.find((p) => p.seat === v.turn);
+        return [hint(who ? "Ходит " + first(who.name) + "." : "Крупье добирает карты.")];
+      }
+      if (v.phase === "result") {
+        const played = m && (m.hands || []).length;
+        const text = !played ? "Раунд сыгран." : m.net > 0 ? "Твой выигрыш: " + fmt(m.net) : m.net < 0 ? "Минус " + fmt(-m.net) : "При своих.";
+        return [h("div", { class: "bj-hint is-result " + (played && m.net > 0 ? "is-win" : played && m.net < 0 ? "is-lose" : "") }, h("span", { text }), h("span", { class: "bj-muted", text: "Новый раунд — через пару секунд" }))];
+      }
+      return [hint("Ждём.")];
     }
 
-    function drawControls(v) {
-      const mine = me(v);
-      const sig = JSON.stringify([v.phase, v.turn, v.me, v.actions, mine && mine.stack, mine && mine.bet, v.max_insurance, v.bet_min, v.bet_max, v.host, v.ending]);
-      if (sig === controlsSig) return;
-      controlsSig = sig;
-      el.controls.replaceChildren(...controlsFor(v));
-      el.controls.classList.toggle("is-empty", !el.controls.childNodes.length);
-      el.controls.classList.toggle("is-your-turn", v.phase === "playing" && v.turn === v.me && v.me !== null);
+    function drawDock(v) {
+      const m = mine(v);
+      const myTurn = v.me !== null && v.me !== undefined && ((v.phase === "playing" && v.turn === v.me) || (v.phase === "betting" && m && !m.bet && (v.actions || []).includes("bet")) || (v.actions || []).includes("insurance"));
+      const hand = m && m.hands && m.active_hand !== null && m.active_hand !== undefined ? m.hands[m.active_hand] : null;
+      const sig = JSON.stringify([v.phase, v.turn, v.me, v.actions, v.round, m && m.stack, m && m.bet, m && m.status, m && m.net, m && m.active_hand, hand && hand.cards.length, v.bet_min, v.bet_max, v.max_insurance, v.host, v.players.length, v.summary]);
+      if (sig !== dockSig) {
+        dockSig = sig;
+        if (v.phase !== "betting") bet = 0;
+        el.dock.replaceChildren(...dockFor(v).filter(Boolean));
+        el.dock.classList.toggle("is-turn", !!myTurn);
+      }
+      if (myTurn && !wasMyTurn && navigator.vibrate) { try { navigator.vibrate(40); } catch (e) { /* не везде можно */ } }
+      wasMyTurn = !!myTurn;
     }
 
-    function drawLog(v) {
-      const lines = (v.log || []).slice(-10).reverse();
-      el.log.replaceChildren(...lines.map((t, i) => h("li", { class: i === 0 ? "is-last" : "" }, t)));
+    function drawFoot(v) {
+      const parts = [h("span", { text: "Ставки " + fmt(v.bet_min) + "–" + fmt(v.bet_max) + (v.round ? " · раунд " + v.round : "") }), h("span", { class: "bj-grow" })];
+      if ((v.log || []).length) parts.push(h("button", { class: "bj-link", type: "button", onclick: () => api.sheet({ title: "История", body: h("ol", { class: "bj-log" }, (state.view.log || []).slice().reverse().map((t) => h("li", { text: t }))) }) }, "История"));
+      parts.push(h("button", { class: "bj-link", type: "button", onclick: rules }, "Правила"));
+      if ((v.actions || []).includes("end") && v.phase !== "lobby") {
+        parts.push(h("button", { class: "bj-link", type: "button", onclick: async () => {
+          const ok = await api.sheet({ title: "Закрыть стол?", body: h("p", { class: "muted", text: "Раунд доиграется, потом все получат свои фишки обратно на счёт." }),
+            actions: [{ label: "Отмена", value: false }, { label: "Закрыть стол", kind: "danger", value: true }] });
+          if (ok) send({ a: "end" });
+        } }, v.ending ? "Стол закрывается" : "Закрыть стол"));
+      }
+      el.foot.replaceChildren(...parts);
+    }
+    function rules() {
+      const rows = [["Цель", "Набрать больше крупье, но не больше 21."], ["Карты", "Картинки — 10, туз — 1 или 11, остальные по номиналу."],
+        ["Блэкджек", "Туз и десятка с раздачи. Платит 3 к 2."], ["Удвоить", "Ставка ×2 — и ровно одна карта."], ["Разделить", "Две одинаковые карты играют как две руки."],
+        ["Страховка", "Если у крупье открыт туз: половина ставки на то, что у него блэкджек."], ["Крупье", "Берёт до 17 и на 17 останавливается."]];
+      api.sheet({ title: "Правила «21»", body: h("dl", { class: "bj-rules" }, rows.map(([t, d]) => [h("dt", { text: t }), h("dd", { text: d })])) });
     }
 
     function update() {
       const v = state && state.view;
       if (!v) return;
       if (v.round !== seenRound) { seen = new Set(); seenRound = v.round; }
-      unlock();
-      drawTop(v);
+      lock.unlock();
+      drawTable(v);
+      drawDock(v);
+      drawFoot(v);
       drawTimer(v);
-      drawFelt(v);
-      drawControls(v);
-      drawLog(v);
     }
 
     const off = api.onState((s) => {
       state = s || null;
-      if (state && state.view && (state.view.me === undefined || state.view.me === null) && state.seat !== undefined && state.seat !== null) {
-        state.view.me = state.seat;                 // на случай, если сервер прислал место отдельно
-      }
+      if (state && state.view && (state.view.me === undefined || state.view.me === null) && state.seat !== undefined && state.seat !== null) state.view.me = state.seat;
       update();
     });
 
     return function cleanup() {
-      clearInterval(timerId);
-      clearTimeout(busyTimer);
+      stopTimer();
+      lock.unlock();
       if (typeof off === "function") off();
       root.replaceChildren();
     };
   }
 
   if (window.QB_GAMES && typeof window.QB_GAMES.register === "function") {
-    window.QB_GAMES.register("blackjack", { title: "21", icon: "♠\ufe0e", solo: false, render });
-  } else if (window.console) {
-    console.error("blackjack.js: window.QB_GAMES не найден");
+    window.QB_GAMES.register("blackjack", { title: "21", solo: false, ownStart: true, render });
   }
 })();

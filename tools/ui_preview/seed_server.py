@@ -1,7 +1,8 @@
 """Стенд для разработки интерфейса: веб-панель на вымышленных данных (14 человек, прогресс, предложения). Запуск:
     python tools/ui_preview/seed_server.py <папка> [секунд]
-В <папке> появятся токены входа (ta.txt, tb.txt, tc.txt, td.txt, te.txt), shots.txt и файлы для tools/ui_preview/shots.js.
-Панель слушает 127.0.0.1:8099. Настоящих людей и токенов здесь нет. Проверка игр с настоящей службой — tests/test_games_integration.py."""
+В <папке> появятся токены входа (ta.txt, tb.txt, tc.txt, td.txt, te.txt, ...), shots.txt и файлы для tools/ui_preview/shots.js.
+Панель слушает 127.0.0.1:8099; служба игр поднимается тут же, в этом процессе, на 127.0.0.1:8098 (своя временная база).
+Настоящих людей и токенов здесь нет. Токены p3, p7, p10, p11 — ещё четверо студентов (для столов на несколько человек)."""
 import asyncio
 import os
 import random
@@ -17,11 +18,16 @@ import config  # noqa: E402
 
 config.CREATOR_IDS = {1}
 config.WEB_PORT, config.WEB_ROLES = 8099, {"admin", "starosta", "user"}
-config.WEB_URL, config.GROUP_NO, config.GAMES_PORT = "http://127.0.0.1:8099", "123456", 0
+config.WEB_URL, config.GROUP_NO = "http://127.0.0.1:8099", "123456"
+config.GAMES_PORT, config.GAMES_SECRET = 8098, "preview-secret-for-games-0123456789"
+
+from aiohttp import web as aioweb  # noqa: E402
 
 import metrics  # noqa: E402
 import web  # noqa: E402
 from db import Database  # noqa: E402
+from games.server import make_app as make_games_app  # noqa: E402
+from games.store import Store  # noqa: E402
 from harness import Harness  # noqa: E402
 
 NAMES = ["Андреев Артём Николаевич", "Беляев Степан Олегович", "Буров Матвей Алексеевич", "Тихонов Глеб Андреевич", "Хромов Тарас Максимович",
@@ -56,10 +62,15 @@ async def main(out: Path, seconds: int) -> None:
     poll = await db.create_poll("Где сдаём в пятницу?", ["Ауд. 101", "Ауд. 205", "Онлайн"], "админ Беляев Степан")
     out.mkdir(parents=True, exist_ok=True)
     (out / "shots.txt").write_text(f"{ids[NAMES[7]]} {subjects[0].id}")
-    for name, chat in (("ta", 1), ("tb", 1), ("tc", 1), ("td", 8), ("te", 8), ("tf", 6), ("tg", 2)):
+    for name, chat in (("ta", 1), ("tb", 1), ("tc", 1), ("td", 8), ("te", 8), ("tf", 6), ("tg", 2), ("p3", 3), ("p7", 7), ("p10", 10), ("p11", 11)):
         (out / f"{name}.txt").write_text(await db.web_token(chat, "login", 3000))
     metrics.install_log_feed()
     asyncio.create_task(metrics.collector(db))
+    store = Store(tempfile.mkdtemp() + "/games.db")
+    await store.open()
+    runner = aioweb.AppRunner(make_games_app(store, config.GAMES_SECRET), access_log=None)
+    await runner.setup()
+    await aioweb.TCPSite(runner, "127.0.0.1", config.GAMES_PORT).start()
     await web.start(db, Harness().bot)
     print(f"Панель: http://127.0.0.1:8099  (poll #{poll}); токены входа лежат в {out}: ta/tb/tc — создатель, tf — староста, tg — админ, td/te — студент", flush=True)
     await asyncio.sleep(seconds)

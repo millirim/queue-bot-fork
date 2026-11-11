@@ -71,7 +71,7 @@ def test_chess_and_checkers_between_two_players(tmp_path):
             await a.send_json({"t": "create", "kind": "chess", "options": {"minutes": 5, "inc": 2}})
             code = (await until(a, "state"))["room"]["code"]
             await b.send_json({"t": "join", "room": code}); await until(b, "state")
-            await a.send_json({"t": "start"}); first = await state_where(a, lambda m: m["room"]["state"] == "playing")
+            first = await state_where(a, lambda m: m["room"]["state"] == "playing")   # сел второй — партия началась сама, без «Начать»
             assert first["view"]["legal"]["e2"] and "board" in first["view"], "белым показаны допустимые ходы"
             await a.send_json({"t": "act", "a": {"a": "move", "from": "e2", "to": "e4"}})
             after = await state_where(b, lambda m: m["view"].get("last_move"))
@@ -85,7 +85,7 @@ def test_chess_and_checkers_between_two_players(tmp_path):
             a, b = await connect(client, 3, "Вера"), await connect(client, 4, "Глеб")  # новые люди: Аня и Боря ещё числятся за законченным столом
             await a.send_json({"t": "create", "kind": "checkers"}); code = (await until(a, "state"))["room"]["code"]
             await b.send_json({"t": "join", "room": code}); await until(b, "state")
-            await a.send_json({"t": "start"}); await state_where(a, lambda m: m["room"]["state"] == "playing")
+            await state_where(a, lambda m: m["room"]["state"] == "playing")
             await a.send_json({"t": "act", "a": {"a": "move", "path": ["c3", "d4"]}})
             moved = await state_where(b, lambda m: m["view"].get("last_move"))
             assert moved["view"]["last_move"]["path"] == ["c3", "d4"]
@@ -162,6 +162,73 @@ def test_poker_conserves_chips_and_hides_cards(tmp_path):
 
 async def _has(seat):
     return seat.state is not None
+
+
+def test_poker_late_join_bust_and_sitting_again_keep_chips(tmp_path, monkeypatch):
+    """Покер — обычный стол на фишки: сесть можно посреди игры, проигравший всё становится зрителем и может сесть заново."""
+    from games.poker import PokerGame
+    monkeypatch.setattr(PokerGame, "PAUSE", 0.1)
+
+    async def scenario():
+        store, client = await boot(tmp_path)
+        try:
+            a, b, c = Seat(await connect(client, 1, "Аня")), Seat(await connect(client, 2, "Боря")), Seat(await connect(client, 3, "Вера"))
+
+            async def chips_ok():                                      # на счетах + в стеках и банке за столом — всегда 3000
+                on_table = sum(p["stack"] + p["total"] for p in a.state["view"]["players"])
+                return sum([await store.balance(i) for i in (1, 2, 3)]) + on_table == 3000
+            await a.ws.send_json({"t": "create", "kind": "poker", "options": {"small_blind": 10, "buyin": 500}})
+            await eventually(lambda: _has(a)); code = a.state["room"]["code"]
+            await b.ws.send_json({"t": "join", "room": code}); await eventually(lambda: _has(b))
+            await a.ws.send_json({"t": "start"})
+
+            async def playing():
+                return a.state["room"]["state"] == "playing" and a.state["view"]["phase"] == "preflop"
+            await eventually(playing)
+            assert a.state["room"]["joinable"], "за идущий стол можно сесть"
+            await c.ws.send_json({"t": "join", "room": code})           # подсадка посреди раздачи
+
+            async def c_seated():
+                return c.state is not None and c.state["seat"] is not None
+            await eventually(c_seated)
+            mine = next(p for p in c.state["view"]["players"] if p["seat"] == c.state["seat"])
+            assert mine["status"] == "waiting" and mine["cards"] == [] and await store.balance(3) == 500
+            await eventually(chips_ok)
+
+            async def someone_busted():                                 # все идут ва-банк, пока кто-нибудь не проиграет всё
+                for me in (a, b, c):
+                    view = me.state["view"]
+                    if me.state["seat"] is not None and view.get("turn") == me.state["seat"] and view.get("actions"):
+                        await me.act({"a": "allin" if "allin" in view["actions"] else "call" if "call" in view["actions"] else "check"})
+                return any(me.state["seat"] is None for me in (a, b, c))
+            await eventually(someone_busted, 40.0)
+            loser = next(me for me in (a, b, c) if me.state["seat"] is None)
+            pid = {id(a): 1, id(b): 2, id(c): 3}[id(loser)]
+            assert loser.state["view"]["me"] is None and loser.state["view"]["can_sit"], "проигравший остался зрителем и видит «Сесть»"
+            assert await store.held(code, pid) == 0 and await store.balance(pid) == 500, "его вклад закрыт, на счету — что не брал за стол"
+            await eventually(chips_ok)                                  # фишки проигравшего у победителя: ничего не пропало и не появилось
+
+            await loser.ws.send_json({"t": "join", "room": code})       # садится заново с новым входом
+
+            async def back():
+                return loser.state["seat"] is not None
+            await eventually(back)
+            assert await store.balance(pid) == 0 and await store.held(code, pid) == 500
+            await eventually(chips_ok)
+
+            for me in (a, b, c):
+                await me.ws.send_json({"t": "leave"})
+
+            async def settled():
+                return not await store._all("SELECT * FROM holds") and await total_chips(store) == 3000
+            await eventually(settled, 10.0)
+            assert all(not me.errors for me in (a, b, c)), [me.errors for me in (a, b, c)]
+            for me in (a, b, c):
+                me.task.cancel()
+                await me.ws.close()
+        finally:
+            await client.close(); await store.close()
+    run(scenario())
 
 
 def test_blackjack_round_pays_back_and_leaves_no_holds(tmp_path):
