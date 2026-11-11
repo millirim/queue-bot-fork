@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from games import poker
 from games.base import Game, GameError
 from games.poker import FULL_DECK, PokerGame, evaluate, hand_name
 
@@ -332,10 +333,30 @@ def test_seating_and_start_rules():
     assert g.can_start()
     g.start()
     with pytest.raises(GameError):
-        g.add_player(100, "Поздно", 500)                    # подсаживать посреди игры нельзя
+        g.add_player(100, "Поздно", 500)                    # все шесть мест заняты
     with pytest.raises(GameError):
         g.start()
     assert g.seat_of(1) == 0 and g.seat_of(14) == 5
+
+
+def test_late_join_sits_out_the_current_hand_and_plays_the_next():
+    g = make(2)
+    clock = Clock(g)
+    g.start()
+    assert g.view(None)["free_seats"] == 4 and g.view(None)["can_sit"] and not g.view(0)["can_sit"]
+    seat = g.add_player(300, "Новый", 700)                 # раздача идёт — садится и ждёт следующую
+    assert seat == 2 and g.seat_of(300) == 2 and g.phase == "preflop"
+    v = g.view(seat)
+    assert v["players"][2]["status"] == "waiting" and v["players"][2]["cards"] == [] and v["actions"] == []
+    assert g.order == [1, 0] or g.order == [0, 1]
+    with pytest.raises(GameError):
+        g.act(seat, {"a": "fold"})
+    assert g.chips_total() == 2700
+    fold_to_end(g)
+    assert g.phase == "between"
+    clock.adv(7.0)
+    assert g.hand_no == 2 and g.seats[2].in_hand and len(g.order) == 3
+    assert len(g.view(seat)["players"][2]["cards"]) == 2 and g.chips_total() == 2700
 
 
 def test_leaving_in_lobby_frees_seat_and_returns_chips():
@@ -628,8 +649,13 @@ def test_side_pot_distribution_best_hand_is_the_biggest_stack():
     g = side_pot_game([3, 2, 1, 0])
     assert stacks(g) == [0, 0, 0, 2000]
     assert g.view(None)["players"][3]["won"] == 2000
-    assert [p["status"] for p in g.view(None)["players"]] == ["out", "out", "out", "winner"]
-    assert g.finished and g.result()["payouts"] == {3: 2000} and g.result()["winners"] == [3]
+    assert [p["status"] for p in g.view(None)["players"]] == ["out", "out", "out", "active"]
+    assert g.phase == "between" and not g.finished          # вскрытие видят все, потом проигравшие освобождают места
+    g.tick(0.0)
+    g.tick(10.0)
+    assert g.phase == "waiting" and g.seats[:3] == [None, None, None]
+    assert g.take_returns() == {0: 0, 1: 0, 2: 0}            # места свободны: сервер закрывает вклады проигравших
+    assert g.remove_player(103) == 2000 and g.finished and g.result()["payouts"] == {}
 
 
 def test_side_pot_distribution_mixed_order():
@@ -1056,12 +1082,15 @@ def test_leaving_when_not_on_turn_that_completes_the_round_moves_the_game_on():
 def test_everybody_leaving_but_one_ends_the_hand_and_the_game():
     g = make(2)
     rig(g, 0, {0: "AsAd", 1: "KsKd"}, "2c7d9hJsQc")
+    clock = Clock(g)
     g.start()
     assert g.remove_player(100) == 0                         # дилер (малый блайнд) уже вложил 10
-    assert g.finished and g.phase == "finished"
-    res = g.result()
-    assert res["winners"] == [1] and res["payouts"] == {0: 990, 1: 1010}
-    assert res["payouts"][0] + res["payouts"][1] == 2000
+    assert g.phase == "between" and not g.finished          # раздача кончилась, стол не закрывается: ждёт новых игроков
+    assert g.take_returns() == {0: 990} and stacks(g) == [0, 1010]
+    clock.adv(10.0)
+    assert g.phase == "waiting" and g.seats[0] is None and g.take_returns() == {0: 0}
+    assert g.remove_player(101) == 1010 and g.finished and g.phase == "finished"
+    assert g.result()["payouts"] == {} and g.chips_total() == 0
 
 
 def test_leaving_between_hands_returns_stack_and_can_end_the_game():
@@ -1072,21 +1101,27 @@ def test_leaving_between_hands_returns_stack_and_can_end_the_game():
     assert g.phase == "between"
     stack = g.seats[g.view(None)["players"][0]["seat"]].stack
     assert g.remove_player(100) == stack
-    assert g.finished
-    assert g.view(None)["summary"].startswith("Победил")
+    assert not g.finished and g.phase == "between"
     clock.adv(10.0)
-    assert g.finished
+    assert g.phase == "waiting" and g.view(1)["timer"] is None and g.seats[0] is None
+    assert g.add_player(300, "Новый", 500) == 0              # сел второй — через паузу пойдёт раздача
+    assert g.phase == "between" and g.view(1)["timer"]["kind"] == "next"
+    clock.adv(10.0)
+    assert g.phase == "preflop" and g.hand_no == 2 and sorted(g.order) == [0, 1]
 
 
 def test_player_removed_in_finished_game_gets_the_stack_once():
     g = make(2)
     g.start()
     act(g, g.cur, "fold")
-    g.remove_player(100)
-    assert g.finished
-    pay = g.result()["payouts"]
-    assert g.remove_player(101) == pay[1]
-    assert g.result()["payouts"] == {}
+    first = g.remove_player(100)
+    assert not g.finished
+    second = g.remove_player(101)
+    assert g.finished and first + second == 2000 and first > 0 and second > 0
+    assert g.result()["payouts"] == {} and g.remove_player(101) == 0
+    assert g.view(None)["summary"] and g.view(None)["phase"] == "finished"
+    with pytest.raises(GameError):
+        g.add_player(500, "Поздно", 100)
 
 
 # ================= конец игры =================
@@ -1094,15 +1129,43 @@ def test_allin_showdown_busts_loser_and_ends_the_table():
     g = make(2, stacks=[500, 500])
     rig(g, 0, {0: "AsAd", 1: "KsKd"}, "2c7d9hJsQc")
     g.start()
+    clock = Clock(g)
     act(g, 0, "allin")
     act(g, 1, "call")
-    assert g.finished
+    assert not g.finished and g.phase == "between"
     v = g.view(None)
     assert v["board"] == cs("2c7d9hJsQc")
     assert stacks(g) == [1000, 0]
-    assert v["players"][1]["status"] == "out" and v["players"][0]["status"] == "winner"
-    assert g.result() == {"summary": "Победил A: 1000 фишек", "winners": [0], "payouts": {0: 1000}}
+    assert v["players"][1]["status"] == "out" and v["players"][0]["status"] == "active"
     assert [x["hand"] for x in v["players"] if x.get("hand")] == ["Пара", "Пара"]
+    shows = v["result"]["shows"]
+    assert shows[0]["text"] == "Пара тузов" and shows[1]["text"] == "Пара королей"
+    assert sorted(shows[0]["best"]) == sorted(cs("AsAd9hJsQc")) and v["result"]["awards"][0]["text"] == "Пара тузов"
+    clock.adv(7.0)                                           # проигравший освобождает место и может сесть заново
+    assert g.phase == "waiting" and g.seats[1] is None and g.seat_of(101) is None and g.take_returns() == {1: 0}
+    assert g.add_player(101, "B", 500) == 1 and g.phase == "between"
+    clock.adv(7.0)
+    assert g.phase == "preflop" and g.hand_no == 2 and g.chips_total() == 1500
+
+
+def test_hand_text_reads_like_a_person_would_say_it():
+    said = {"AsKsQsJsTs": "Роял-флеш", "9h8h7h6h5h": "Стрит-флеш до девятки", "AcAdAhAs2c": "Каре тузов", "QcQdQh7s7c": "Фулл-хаус: дамы и семёрки",
+            "Kd9d7d4d2d": "Флеш до короля", "5c4d3h2sAc": "Стрит до пятёрки", "JcJdJh9s2c": "Сет валетов", "KcKd7h7s2c": "Две пары: короли и семёрки",
+            "TcTd9h4s2c": "Пара десяток", "Ac9d7h4s2c": "Старшая карта — туз"}
+    for cards, text in said.items():
+        assert poker.hand_text(poker.evaluate(cs(cards))) == text, cards
+    score, five = poker.best_five(cs("AsAd2c7d9hJsQc"))
+    assert score == poker.evaluate(cs("AsAd2c7d9hJsQc")) and sorted(five) == sorted(cs("AsAd9hJsQc"))
+
+
+def test_my_hand_hint_is_only_for_the_owner():
+    g = make(2)
+    rig(g, 0, {0: "AsAd", 1: "Ks7d"}, "2c7c9hJsQc")
+    g.start()
+    assert g.view(0)["my_hand"] == "Пара тузов" and g.view(1)["my_hand"] is None and g.view(None)["my_hand"] is None
+    act(g, 0, "call")
+    act(g, 1, "check")
+    assert g.phase == "flop" and g.view(1)["my_hand"] == "Пара семёрок" and g.view(None)["my_hand"] is None
 
 
 def test_busted_players_leave_the_table_and_game_goes_on_with_the_rest():
@@ -1115,10 +1178,11 @@ def test_busted_players_leave_the_table_and_game_goes_on_with_the_rest():
     act(g, 2, "fold")
     assert g.seats[0].busted and stacks(g)[0] == 0
     assert not g.finished and g.phase == "between"
-    clock.adv(7.0)
-    assert g.hand_no == 2 and not g.seats[0].in_hand
-    assert len(g.order) == 2 and g.dealer in (1, 2)
     assert g.view(None)["players"][0]["status"] == "out"
+    clock.adv(7.0)
+    assert g.hand_no == 2 and g.seats[0] is None and g.seat_of(100) is None
+    assert len(g.order) == 2 and g.dealer in (1, 2)
+    assert [p["seat"] for p in g.view(None)["players"]] == [1, 2] and g.take_returns() == {0: 0}
 
 
 def test_host_moves_when_first_player_leaves_and_view_contract():
@@ -1146,6 +1210,8 @@ def check_leaks(g, viewers):
         for s in g.seats:
             if s and s.shown:
                 public |= set(s.hole)
+        for show in ((g.last_result or {}).get("shows") or {}).values():   # вскрытые на последнем шоудауне (их место могло уже освободиться)
+            public |= set(show["cards"])
         if viewer is not None and g.seats[viewer]:
             public |= set(g.seats[viewer].hole)
         for c in secret_deck:
@@ -1195,8 +1261,29 @@ def run_poker_table(seed, max_hands, stats):
     last_hand = g.hand_no
     worst_ms = 0.0
     steps = 0
+    next_id = 2000
+
+    def sit():
+        nonlocal total_in, next_id
+        chips = rng.choice([big * 100, rng.randint(1, big * 200), big * 3])
+        try:
+            seat = g.add_player(next_id, f"Н{next_id}", chips)
+        except GameError:
+            return
+        ids[seat] = next_id
+        next_id += 1
+        total_in += chips
+        stats["joins"] += 1
+
     while not g.finished and g.hand_no <= max_hands and steps < 40000:
         steps += 1
+        if g.phase == "waiting":                              # остался один с фишками: либо кто-то садится, либо расходимся
+            stats["waits"] += 1
+            if rng.random() < 0.6:
+                sit()
+                returned += sum(g.take_returns().values())
+                continue
+            break
         assert g.chips_total() + returned == total_in, ("фишки не сохранились", seed, steps, g.phase)
         for s in g.seats:
             if s:
@@ -1231,6 +1318,8 @@ def run_poker_table(seed, max_hands, stats):
                     returned += g.remove_player(ids[seat])
                     returned += sum(g.take_returns().values())
                     stats["leaves"] += 1
+            elif roll < 0.12:
+                sit()                                         # подсадка посреди раздачи: играет со следующей
             else:
                 action = random_poker_action(g, rng)
                 t0 = time.perf_counter()
@@ -1238,19 +1327,29 @@ def run_poker_table(seed, max_hands, stats):
                 worst_ms = max(worst_ms, (time.perf_counter() - t0) * 1000)
             returned += sum(g.take_returns().values())
         elif g.phase == "between":
+            if g.last_result and g.last_result["hand"] == g.hand_no and not stats["seen"].get((seed, g.hand_no)):
+                stats["seen"][(seed, g.hand_no)] = True
+                check_hand_result(g, stats)
+            if rng.random() < 0.1:
+                sit()
             t += rng.choice([1.0, 3.0, 7.0])
             g.tick(t)
             returned += sum(g.take_returns().values())
-        if g.last_result and g.last_result["hand"] == g.hand_no and g.phase in ("between", "finished") and not stats["seen"].get((seed, g.hand_no)):
-            stats["seen"][(seed, g.hand_no)] = True
-            check_hand_result(g, stats)
     assert worst_ms < Game.ACT_BUDGET_MS, worst_ms
     assert steps < 40000, ("игра зависла", seed)
-    if g.finished:
-        res = g.result()
-        assert all(v > 0 for v in res["payouts"].values())
-        assert sum(res["payouts"].values()) + returned == total_in, ("итоговые выплаты не сходятся", seed)
-        stats["finished"] += 1
+    assert g.chips_total() + returned == total_in
+    # все встают из-за стола: каждому — его стек, на столе не остаётся ничего
+    for seat in [i for i, s in enumerate(g.seats) if s and not s.left and not s.kicked]:
+        returned += g.remove_player(ids[seat])
+        returned += sum(g.take_returns().values())
+    t += 100.0
+    g.tick(t)
+    returned += sum(g.take_returns().values())
+    res = g.result()
+    assert g.finished and res is not None, ("стол не закрылся, когда все встали", seed, g.phase)
+    assert returned + sum(res["payouts"].values()) == total_in, ("итоговые выплаты не сходятся", seed)
+    assert g.chips_total() == sum(res["payouts"].values())
+    stats["finished"] += 1
     return g
 
 
@@ -1283,7 +1382,8 @@ def check_hand_result(g, stats):
 
 
 def test_fuzz_2000_hands_chips_conserved_no_hangs_no_leaks():
-    stats = {"hands": 0, "timeouts": 0, "errors": 0, "leaves": 0, "finished": 0, "showdowns": 0, "uncalled": 0, "multi_pot": 0, "seen": {}}
+    stats = {"hands": 0, "timeouts": 0, "errors": 0, "leaves": 0, "finished": 0, "showdowns": 0, "uncalled": 0, "multi_pot": 0, "seen": {},
+             "joins": 0, "waits": 0}
     seed = 0
     while stats["hands"] < 2000:
         run_poker_table(seed, 40, stats)
@@ -1293,6 +1393,7 @@ def test_fuzz_2000_hands_chips_conserved_no_hangs_no_leaks():
     # в прогоне встретились все интересные случаи, иначе проверка была бы пустой
     assert stats["showdowns"] > 300 and stats["multi_pot"] > 50 and stats["uncalled"] > 50
     assert stats["timeouts"] > 50 and stats["errors"] > 50 and stats["leaves"] > 5 and stats["finished"] > 10
+    assert stats["joins"] > 30 and stats["waits"] > 5, stats
 
 
 def test_act_is_fast_at_showdown_with_six_players():

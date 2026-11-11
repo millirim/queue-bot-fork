@@ -1,10 +1,118 @@
-/* Раздел «Игры»: лобби, столы, панель стола. Свои стили у каждой игры — в <игра>.css */
-.games { display: grid; gap: 16px; }
-.games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 16px; }
-.games-card .games-title { margin: 0 0 6px; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
-.games-card p { margin: 0 0 10px; }
-.games-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.games-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
-.games-bar .row-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+/* Раздел «Игры»: общий набор (карты, фишки, аватары), лобби и полоска стола. Свои стили у каждой игры — в <игра>.css.
+   Цвета берутся из токенов панели (app/app.css); сукно и карты — свои, одинаковые во всех темах. */
+:root {
+  --felt: #1d6b4c; --felt-2: #145038; --felt-line: rgba(255, 255, 255, .14); --rail: #2a2622;
+  --card-bg: #ffffff; --card-ink: #17171a; --card-red: #d6202a; --card-back: #b3401f;
+  --gold: #e9b949;
+}
+
+.games { display: grid; gap: 16px; min-width: 0; }
 .games-play { min-width: 0; }
+.page:has(.games-play) { max-width: 1040px; }
 .games .hidden { display: none; }
+
+/* ---------- карты ---------- */
+.gk-card {
+  --cw: 52px; position: relative; display: inline-block; flex: none; width: var(--cw); aspect-ratio: 5 / 7; border-radius: calc(var(--cw) * .13);
+  background: var(--card-bg); color: var(--card-ink); box-shadow: 0 1px 2px rgba(0, 0, 0, .28), 0 4px 10px rgba(0, 0, 0, .18);
+  font-family: var(--font); font-weight: 700; line-height: 1; user-select: none; transition: transform .25s ease, filter .25s ease, box-shadow .25s ease;
+}
+.gk-card.is-sm { --cw: 34px; }
+.gk-card.is-lg { --cw: 68px; }
+.gk-card.is-red { color: var(--card-red); }
+.gk-card-rank { position: absolute; top: 7%; left: 10%; font-size: calc(var(--cw) * .36); letter-spacing: -.04em; }
+.gk-card-suit { position: absolute; top: 36%; left: 10%; font-size: calc(var(--cw) * .27); }
+.gk-card-pip { position: absolute; right: 8%; bottom: 5%; font-size: calc(var(--cw) * .58); opacity: .92; }
+.gk-card.is-sm .gk-card-suit { display: none; }
+.gk-card.is-sm .gk-card-rank { font-size: calc(var(--cw) * .44); top: 8%; }
+.gk-card.is-sm .gk-card-pip { font-size: calc(var(--cw) * .5); }
+.gk-card.is-back {
+  background: var(--card-back) repeating-linear-gradient(45deg, rgba(255, 255, 255, .16) 0 2px, transparent 2px 7px);
+  border: calc(var(--cw) * .06) solid #fff;
+}
+.gk-card.is-fresh { animation: gk-deal .32s cubic-bezier(.2, .8, .2, 1) backwards; }
+.gk-card.is-dim { filter: brightness(.55) saturate(.6); }
+.gk-card.is-hl { transform: translateY(-14%); box-shadow: 0 0 0 2px var(--gold), 0 8px 18px rgba(0, 0, 0, .35); }
+@keyframes gk-deal { from { opacity: 0; transform: translateY(-40%) scale(.85) rotate(-6deg); } }
+
+/* ---------- фишки и люди ---------- */
+.gk-chips { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gk-chips b { font-weight: 650; }
+.gk-chip {
+  flex: none; width: 14px; height: 14px; border-radius: 50%; background: var(--brand);
+  border: 2px dashed rgba(255, 255, 255, .85); box-shadow: 0 0 0 1px rgba(0, 0, 0, .25);
+}
+.gk-chips.is-pot .gk-chip { background: var(--gold); }
+.gk-chips.is-win { color: var(--ok); }
+.gk-avatar { --hue: 20; position: relative; display: inline-grid; place-items: center; flex: none; width: 44px; height: 44px; border-radius: 50%; }
+.gk-avatar-face {
+  display: grid; place-items: center; width: 100%; height: 100%; border-radius: 50%; color: #fff; font-size: 14px; font-weight: 700; letter-spacing: .02em;
+  background: hsl(var(--hue) 42% 40%); box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .18);
+}
+.is-busy .gk-btn, .is-busy button { pointer-events: none; }
+
+/* ---------- лобби ---------- */
+.gl-balance { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border: 1px solid var(--border); border-radius: 99px; background: var(--surface); font-size: 15px; }
+.gl-balance:hover { background: var(--surface-3); }
+.gl-chips-big { font-size: 34px; display: flex; justify-content: center; padding: 6px 0 2px; }
+.gl-chips-big .gk-chip { width: 26px; height: 26px; border-width: 3px; }
+.gl-section { display: grid; gap: 8px; }
+.gl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 12px; }
+.gl-tile { display: grid; grid-template-columns: 96px minmax(0, 1fr); grid-template-areas: "art body" "foot foot"; gap: 12px 14px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+.gl-art { grid-area: art; display: grid; place-items: center; width: 96px; height: 72px; border-radius: 12px; overflow: hidden; background: var(--surface-3); }
+.gl-art svg { width: 100%; height: 100%; }
+.gl-body { grid-area: body; min-width: 0; display: grid; gap: 3px; align-content: center; }
+.gl-body h3 { font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+.gl-desc { font-size: 14px; color: var(--text-2); }
+.gl-meta { font-size: 12.5px; color: var(--text-3); }
+.gl-foot { grid-area: foot; display: flex; align-items: center; gap: 8px; }
+.gl-foot .btn { flex: 1; }
+.gl-link { flex: none; height: 40px; padding: 0 12px; border: 0; border-radius: 12px; background: none; color: var(--text-2); font-weight: 550; font-size: 14px; }
+.gl-link:hover { background: var(--surface-3); color: var(--text); }
+.gl-retry { display: flex; justify-content: center; padding: 0 16px 20px; }
+.gl-place { display: inline-grid; place-items: center; min-width: 26px; height: 26px; border-radius: 8px; background: var(--surface-3); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.gl-place.top { background: var(--brand-soft); color: var(--brand-ink); }
+
+/* картинки игр */
+.gl-art-poker, .gl-art-blackjack { background: linear-gradient(140deg, var(--felt), var(--felt-2)); }
+.gl-art .c1, .gl-art .c2 { fill: #fff; stroke: rgba(0, 0, 0, .12); }
+.gl-art text { font: 700 26px var(--font); }
+.gl-art .g { fill: #17171a; } .gl-art .r { fill: var(--card-red); }
+.gl-art-checkers, .gl-art-chess { background: #c9a877; }
+.gl-art .sq1 { fill: #e9d3ae; } .gl-art .sq2 { fill: #8a5a35; }
+.gl-art .pw { fill: #f6f1e7; stroke: #b9ab94; stroke-width: 3; } .gl-art .pb { fill: #2b2623; stroke: #6b5e55; stroke-width: 3; }
+.gl-art .knight { font: 400 50px serif; fill: #201b18; }
+.gl-art-2048 { background: #efe6da; }
+.gl-art .t1 { fill: #eee4da; } .gl-art .t2 { fill: #ede0c8; } .gl-art .t3 { fill: #f2b179; } .gl-art .t4 { fill: #f59563; }
+.gl-art .n { font: 800 17px var(--font); fill: #5c5247; } .gl-art .n.w { fill: #fff; }
+.gl-art-snake { background: #16261c; }
+.gl-art .snake { fill: none; stroke: #4cc38a; stroke-width: 10; stroke-linecap: round; stroke-linejoin: round; }
+.gl-art .head { fill: #7be0ab; } .gl-art .apple { fill: #ff5a4d; }
+
+.gl-rooms { overflow: hidden; }
+.gl-room { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px; min-width: 0; }
+.gl-room + .gl-room { border-top: 1px solid var(--border); }
+.gl-room-ico { flex: none; width: 10px; height: 36px; border-radius: 5px; }
+.gl-room-main { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.gl-room-main b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gl-room-acts { display: flex; gap: 6px; flex: none; }
+.gl-opt { display: grid; gap: 6px; min-width: 0; }
+.gl-opt.is-row { grid-template-columns: 1fr auto; align-items: center; }
+.gl-opt-title { font-size: 13px; font-weight: 600; color: var(--text-2); }
+
+/* ---------- полоска стола ---------- */
+.gt-bar { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px; }
+.gt-back { flex: none; display: grid; place-items: center; width: 40px; height: 40px; margin-left: -8px; border: 0; border-radius: 12px; background: none; color: var(--text-2); }
+.gt-back:hover { background: var(--surface-3); color: var(--text); }
+.gt-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gt-title > b { font-size: 20px; font-weight: 650; letter-spacing: -.015em; }
+.gt-code { height: 26px; padding: 0 8px; border: 1px dashed var(--border-strong); border-radius: 8px; background: none; color: var(--text-2); font: 600 12.5px var(--mono); letter-spacing: .06em; }
+.gt-code:hover { color: var(--text); border-style: solid; }
+.gt-sub { font-size: 13px; color: var(--text-3); white-space: nowrap; }
+.gt-acts { display: flex; gap: 6px; flex: none; }
+@media (max-width: 899px) {
+  body.in-game .topbar { display: none; }
+  body.in-game .main { padding-top: max(8px, env(safe-area-inset-top)); }
+  .gl-tile { grid-template-columns: 84px minmax(0, 1fr); }
+  .gl-art { width: 84px; height: 64px; }
+}

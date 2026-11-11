@@ -24,12 +24,19 @@
   (зритель вообще не видит закрытых карт). Следствие: после раздачи открыта вся колода, в том числе карты сбросивших.
   Карты сбросивших в самой раздаче вскрытием не показываются, показываются только карты дошедших до вскрытия.
 
+Стол живёт как обычная игра на фишки, а не турнир
+- Сесть можно в любой момент, пока есть свободное место (late_join): новый игрок вступает со следующей раздачи.
+- Если игроков с фишками меньше двух, стол ждёт (phase "waiting"); как только их снова двое — через паузу начинается раздача.
+- Игрок без фишек после раздачи освобождает место (после паузы, чтобы все увидели вскрытие) и может сесть заново с новым входом.
+- Стол заканчивается (finished), только когда из-за него встали все.
+
 Выход из-за стола
 - remove_player посреди раздачи — это фолд. Если игрок ещё ничего не вложил в раздачу (не блайнд и не ходил), весь стек возвращается
   сразу (результат remove_player). Если уже вложил, фишки вне банка возвращаются в конце раздачи: их забирает take_returns()
   (словарь {место: фишки}), а если сервер его не вызывал, они войдут в result()["payouts"].
 - Три таймаута хода подряд: игрок сбрасывает карты и выбывает из-за стола, остаток стека отдаётся так же (take_returns / payouts).
-- Игрок без фишек после раздачи выбывает; стол заканчивается, когда остался один игрок с фишками.
+- Место ушедшего, убранного или проигравшего всё освобождается, когда ему больше ничего не причитается; take_returns() сообщает о
+  таком месте записью {место: 0} — по ней сервер закрывает вклад человека, и он может сесть снова.
 
 Для тестов: _stack_deck(cards, dealer=None) подставляет порядок колоды на СЛЕДУЮЩУЮ раздачу (карты сверху колоды, остальное — случайно),
 dealer — принудительное место дилера.
@@ -100,11 +107,50 @@ def evaluate(cards) -> tuple:
     return max(_score5(five) for five in itertools.combinations(cards, 5))
 
 
+def best_five(cards) -> tuple:
+    """Лучшая пятёрка из 5-7 карт: (кортеж силы, [пять карт])."""
+    cards = list(cards)
+    five = max(itertools.combinations(cards, 5), key=_score5)
+    return _score5(five), list(five)
+
+
 def hand_name(score: tuple) -> str:
     """Название комбинации по кортежу из evaluate()."""
     if score[0] == 8 and score[1] == 14:
         return ROYAL
     return CATEGORY_NAMES[score[0]]
+
+
+_ONE = {2: "двойка", 3: "тройка", 4: "четвёрка", 5: "пятёрка", 6: "шестёрка", 7: "семёрка", 8: "восьмёрка", 9: "девятка", 10: "десятка",
+        11: "валет", 12: "дама", 13: "король", 14: "туз"}
+_MANY = {2: "двойки", 3: "тройки", 4: "четвёрки", 5: "пятёрки", 6: "шестёрки", 7: "семёрки", 8: "восьмёрки", 9: "девятки", 10: "десятки",
+         11: "валеты", 12: "дамы", 13: "короли", 14: "тузы"}
+_OF_MANY = {2: "двоек", 3: "троек", 4: "четвёрок", 5: "пятёрок", 6: "шестёрок", 7: "семёрок", 8: "восьмёрок", 9: "девяток", 10: "десяток",
+            11: "валетов", 12: "дам", 13: "королей", 14: "тузов"}
+_UP_TO = {5: "пятёрки", 6: "шестёрки", 7: "семёрки", 8: "восьмёрки", 9: "девятки", 10: "десятки", 11: "валета", 12: "дамы", 13: "короля",
+          14: "туза"}
+
+
+def hand_text(score: tuple) -> str:
+    """Комбинация словами, как её назвал бы человек: «Пара тузов», «Стрит до дамы», «Фулл-хаус: дамы и семёрки»."""
+    cat = score[0]
+    if cat == 8:
+        return ROYAL if score[1] == 14 else f"Стрит-флеш до {_UP_TO[score[1]]}"
+    if cat == 7:
+        return f"Каре {_OF_MANY[score[1]]}"
+    if cat == 6:
+        return f"Фулл-хаус: {_MANY[score[1]]} и {_MANY[score[2]]}"
+    if cat == 5:
+        return f"Флеш до {_UP_TO.get(score[1], _MANY[score[1]])}"
+    if cat == 4:
+        return f"Стрит до {_UP_TO[score[1]]}"
+    if cat == 3:
+        return f"Сет {_OF_MANY[score[1]]}"
+    if cat == 2:
+        return f"Две пары: {_MANY[score[1]]} и {_MANY[score[2]]}"
+    if cat == 1:
+        return f"Пара {_OF_MANY[score[1]]}"
+    return f"Старшая карта — {_ONE[score[1]]}"
 
 
 def _valid_card(card) -> bool:
@@ -151,6 +197,7 @@ class PokerGame(Game):
     min_players = 2
     max_players = MAX_SEATS
     uses_chips = True
+    late_join = True      # за идущий стол можно сесть: игрок вступит со следующей раздачи
     PAUSE = 6.0           # пауза после раздачи, секунд (в тестах можно обнулить)
     MAX_TIMEOUTS = 3
 
@@ -179,7 +226,8 @@ class PokerGame(Game):
     def __init__(self, options: dict[str, Any], rng):
         super().__init__(self.clean_options(options), rng)
         self.seats: list[_Seat | None] = [None] * MAX_SEATS
-        self.phase = "lobby"      # lobby, preflop, flop, turn, river, between (пауза после раздачи), finished
+        # lobby, preflop, flop, turn, river, between (пауза после раздачи), waiting (игроков с фишками меньше двух), finished
+        self.phase = "lobby"
         self.dealer: int | None = None
         self.hand_no = 0
         self.small_blind = self.options["small_blind"]
@@ -200,6 +248,8 @@ class PokerGame(Game):
         self.log: list[str] = []
         self.summary = ""
         self._returns: dict[int, int] = {}
+        self._closed: set[int] = set()   # места, освобождённые с момента последнего take_returns()
+        self._best: dict[int, list] = {}  # место -> пять карт лучшей комбинации на последнем вскрытии
         self._finished = False
         self._winners: list[int] = []
         self._clock: float | None = None
@@ -218,8 +268,8 @@ class PokerGame(Game):
         return None
 
     def add_player(self, player_id: int, name: str, chips: int = 0) -> int:
-        if self.phase != "lobby":
-            raise GameError("Игра уже идёт, подсесть нельзя")
+        if self._finished:
+            raise GameError("Этот стол уже закрыт")
         if self._find(player_id) is not None:
             raise GameError("Ты уже за столом")
         if isinstance(chips, bool) or not isinstance(chips, int) or chips <= 0:
@@ -227,8 +277,13 @@ class PokerGame(Game):
         for i, s in enumerate(self.seats):
             if s is None:
                 self.seats[i] = _Seat(player_id, (str(name).strip() or "Игрок")[:24], chips)
+                if self.phase == "waiting" and len(self._eligible()) >= 2:
+                    self.phase = "between"       # нас снова двое: короткая пауза — и раздача
+                    self._arm(self.PAUSE)
+                elif self.phase != "lobby":
+                    self._log(f"{self.seats[i].name} садится за стол")
                 return i
-        raise GameError("За столом нет мест")
+        raise GameError("За столом нет свободных мест")
 
     def seat_of(self, player_id: int) -> int | None:
         return self._find(player_id)
@@ -288,16 +343,27 @@ class PokerGame(Game):
                 self._advance(idx)
             elif self._round_complete():
                 self._next_street()
-        elif self.phase == "between":
-            if len(self._alive()) < 2:
-                self._finish_game()
-        elif self.phase == "finished":
+        elif self.phase in ("waiting", "finished"):
             self._flush_ghosts()
+            self._sweep()
+        if self.phase != "lobby" and not self._finished and not self._present():
+            self._finish_game()       # из-за стола встали все
+
+    def _sweep(self) -> None:
+        """Освободить места тех, кому больше ничего не причитается: ушедших, убранных за пропуски и проигравших всё.
+        Зовётся только вне раздачи. Освобождённые места попадают в take_returns() записью {место: 0}."""
+        for i, s in enumerate(self.seats):
+            if s and (s.left or s.kicked or s.busted) and s.stack == 0:
+                self.seats[i] = None
+                self._closed.add(i)
 
     def take_returns(self) -> dict[int, int]:
         """Фишки, которые нужно вернуть игрокам прямо сейчас: {место: фишки} (ушедшие и убранные за таймауты). Очищает список.
         Сервер вызывает после remove_player/tick/act, пока помнит, какой человек сидел на месте. Не вызвал — всё войдёт в result()."""
         out, self._returns = self._returns, {}
+        for i in self._closed:
+            out.setdefault(i, 0)      # место свободно, вклад человека можно закрывать
+        self._closed = set()
         return out
 
     # ================= таймер =================
@@ -315,7 +381,7 @@ class PokerGame(Game):
         if self._deadline is not None and now >= self._deadline:
             changed = True
             if self.phase == "between":
-                self._start_hand()
+                self._begin_next()
             elif self.phase in STREETS and self.cur is not None:
                 self._timeout()
             else:
@@ -365,10 +431,26 @@ class PokerGame(Game):
                 return j
         return idx
 
+    def _begin_next(self) -> None:
+        """Пауза после раздачи кончилась: освобождаем места выбывших и начинаем раздачу, если есть с кем играть."""
+        self._flush_ghosts()
+        self._sweep()
+        if not self._present():
+            self._finish_game()
+        else:
+            self._start_hand()
+
+    def _wait(self) -> None:
+        """Игроков с фишками меньше двух: стол ждёт, пока кто-нибудь сядет."""
+        self.phase = "waiting"
+        self.cur = None
+        self._arm(None)
+        self._log("Ждём игроков: для раздачи нужны хотя бы двое с фишками")
+
     def _start_hand(self) -> None:
         elig = self._eligible()
         if len(elig) < 2:
-            self._finish_game()
+            self._wait()
             return
         every = self.options["raise_blinds_every"]
         if every and self.hand_no and self.hand_no % every == 0:
@@ -675,7 +757,9 @@ class PokerGame(Game):
 
     def _showdown(self) -> None:
         live = [i for i, s in enumerate(self.seats) if s and s.in_hand and not s.folded]
-        scores = {i: evaluate(self.seats[i].hole + self.board) for i in live}
+        best = {i: best_five(self.seats[i].hole + self.board) for i in live}
+        scores = {i: b[0] for i, b in best.items()}
+        self._best = {i: b[1] for i, b in best.items()}
         for i in live:
             self.seats[i].shown = True
         awards: list[dict[str, Any]] = []
@@ -695,12 +779,13 @@ class PokerGame(Game):
                 self.seats[i].stack += got
                 self.seats[i].won += got
             names = ", ".join(self.seats[i].name for i in winners)
-            awards.append({"amount": amount, "winners": winners, "hand": hand_name(best), "eligible": list(elig)})
+            awards.append({"amount": amount, "winners": winners, "hand": hand_name(best), "text": hand_text(best), "eligible": list(elig)})
             verb = "забирает" if len(winners) == 1 else "делят"
-            self._log(f"{names} {verb} банк {amount}: {hand_name(best)}")
+            self._log(f"{names} {verb} банк {amount}: {hand_text(best).lower()}")
         self._end_hand(awards, showdown=True, scores=scores)
 
     def _end_uncontested(self) -> None:
+        self._best = {}
         live = [i for i, s in enumerate(self.seats) if s and s.in_hand and not s.folded]
         total = self.pot_total()
         awards: list[dict[str, Any]] = []
@@ -716,7 +801,8 @@ class PokerGame(Game):
         shows = {}
         for i, s in enumerate(self.seats):
             if s and s.in_hand and s.shown:
-                shows[i] = {"cards": list(s.hole), "hand": hand_name(scores[i])}
+                shows[i] = {"cards": list(s.hole), "hand": hand_name(scores[i]), "text": hand_text(scores[i]),
+                            "best": list(getattr(self, "_best", {}).get(i, []))}
         self.last_result = {"hand": self.hand_no, "showdown": showdown, "awards": awards, "shows": shows,
                             "board": list(self.board), "names": {i: s.name for i, s in enumerate(self.seats) if s}}
         self.reveal = {"hand": self.hand_no, "deck": list(self.deck), "salt": self.salt, "hash": self.deck_hash,
@@ -729,10 +815,11 @@ class PokerGame(Game):
                 self._log(f"{s.name} остался без фишек и выбывает")
         self.cur = None
         self._flush_ghosts()
-        if len(self._alive()) < 2:
+        if not self._present():
+            self._sweep()
             self._finish_game()
         else:
-            self.phase = "between"
+            self.phase = "between"       # пауза: все видят вскрытие; потом _begin_next решит, играть дальше или ждать игроков
             self._arm(self.PAUSE)
 
     def _flush_ghosts(self) -> None:
@@ -748,12 +835,10 @@ class PokerGame(Game):
         self.cur = None
         self._arm(None)
         self._flush_ghosts()
+        self._sweep()
         alive = self._alive()
         self._winners = list(alive)
-        if len(alive) == 1:
-            self.summary = f"Победил {self.seats[alive[0]].name}: {self.seats[alive[0]].stack} фишек"
-        else:
-            self.summary = "Игра закончилась"
+        self.summary = "Стол закрыт: все встали"
         self._log(self.summary)
 
     @property
@@ -787,13 +872,11 @@ class PokerGame(Game):
             return "kicked"
         if s.busted or (s.stack == 0 and self.phase != "lobby" and not s.in_hand):
             return "out"
-        if self.phase == "finished":
-            return "winner" if s.stack > 0 else "out"
-        if self.phase == "lobby" or not s.in_hand:
+        if self.phase in ("lobby", "waiting", "finished") or not s.in_hand:
             return "waiting"
         if s.folded:
             return "folded"
-        if s.allin:
+        if s.allin and self.phase in STREETS:
             return "allin"
         return "active"
 
@@ -826,6 +909,15 @@ class PokerGame(Game):
             timer = {"left": round(max(0.0, self._deadline - self._clock), 2), "total": self._timer_total,
                      "kind": "next" if self.phase == "between" else "turn"}
         ever_started = self.phase != "lobby"
+        my_hand = None
+        if me is not None and self.phase in STREETS:
+            mine = self.seats[me]
+            if mine.in_hand and not mine.folded and len(mine.hole) == 2:
+                if len(self.board) >= 3:
+                    my_hand = hand_text(evaluate(mine.hole + self.board))
+                elif mine.hole[0][0] == mine.hole[1][0]:
+                    my_hand = f"Пара {_OF_MANY[RANK_VALUE[mine.hole[0][0]]]}"
+        free = sum(1 for x in self.seats if x is None)
         return {
             "kind": self.kind, "phase": self.phase, "turn": self.cur, "me": me, "host": self.host(), "hand": self.hand_no,
             "players": players, "log": self.log[-VIEW_LOG:],
@@ -842,4 +934,5 @@ class PokerGame(Game):
             "deck_hash": self.deck_hash or None, "reveal": self.reveal, "prev_reveal": self.prev_reveal,
             "result": self.last_result, "options": dict(self.options), "can_start": self.can_start(),
             "summary": self.summary if self._finished else None,
+            "my_hand": my_hand, "free_seats": free, "can_sit": me is None and free > 0 and not self._finished,
         }
