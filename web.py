@@ -1442,6 +1442,10 @@ async def middleware(request: web.Request, handler):
     response.headers["X-Request-Id"] = rid
     if api:
         response.headers["Cache-Control"] = "no-store"
+    elif request.path.startswith("/assets/") and "Cache-Control" not in response.headers:
+        # Файлы интерфейса: каждый раз спрашиваем, не изменились ли (ответ 304, если нет). Без этого Telegram и браузеры
+        # держат старые скрипты после обновления бота, и новые возможности «не появляются».
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 

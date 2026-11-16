@@ -474,3 +474,17 @@ def test_student_swaps_from_web(tmp_path, monkeypatch):
             await client.close()
             await db.close()
     run(scenario())
+
+
+def test_ui_files_are_revalidated_not_cached_blindly(tmp_path, monkeypatch):
+    """Файлы интерфейса отдаются с no-cache: после обновления бота Telegram не должен показывать старые скрипты из кэша."""
+    async def scenario():
+        db = Database(str(tmp_path / "q.db")); await db.connect()
+        client = TestClient(TestServer(web.make_app(db, Harness().bot))); await client.start_server()
+        try:
+            for path in ("/", "/assets/app/main.js", "/assets/app/app.css", "/assets/theme.js"):
+                r = await client.get(path)
+                assert r.status == 200 and r.headers["Cache-Control"] == "no-cache", path
+        finally:
+            await client.close(); await db.close()
+    asyncio.run(scenario())
