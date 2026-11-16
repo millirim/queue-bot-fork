@@ -11,7 +11,7 @@ from common import (
     show, staff_kind, subgroup_buttons, subgroup_view, updated_at, web_allowed, web_role,
 )
 from db import Database, Student
-from ranking import RULES, WANT
+from ranking import FULL, RULES, WANT, is_full
 
 router = Router()
 
@@ -354,7 +354,8 @@ async def show_my(target: Message | CallbackQuery, db: Database, student: Studen
         if st.sub_place:
             place += f" · в {student.subgroup} подгр. <b>{st.sub_place}</b> из {st.sub_total}"
         want = f" {WANT}" if st.row.wants else ""
-        text += f"\n{esc(s.title)}: <b>{st.row.done}/{s.total}</b>{want}\n   {place}"
+        star = f" {FULL}" if is_full(st.row.done, s.total) else ""
+        text += f"\n{esc(s.title)}: <b>{st.row.done}/{s.total}</b>{star}{want}\n   {place}"
         buttons.append(btn(s.title, f"s:{s.id}"))
     if not buttons:
         text += "\nПредметов пока нет."

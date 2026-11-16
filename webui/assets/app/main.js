@@ -1,6 +1,7 @@
 // Вход в приложение: Telegram, вход, каркас (меню по ролям), маршруты, значки, тема.
 import { h, fill, icon, state, store, api, can, featureOn, leavePage, initials, nick, roleName, firstName } from "./core.js";
 import { button, sheet, segmented, toggle, confirm, toast, action, pageHead, closePopover, empty, skeleton } from "./ui.js";
+import { startStatus } from "./status.js";
 import * as queue from "./pages/queue.js";
 import * as polls from "./pages/polls.js";
 import * as ideas from "./pages/ideas.js";
@@ -55,7 +56,7 @@ const NAV = [
   { id: "queue", label: "Очереди", ic: "queue", badge: "swaps" },
   { id: "manage", label: "Управление", ic: "manage", min: "starosta", badge: "requests" },
   { id: "system", label: "Система", ic: "system", min: "admin" },
-  { id: "polls", label: "Голосования", ic: "vote", badge: "polls", feature: "polls" },
+  { id: "polls", label: "Голосования", short: "Опросы", ic: "vote", badge: "polls", feature: "polls" },
   { id: "games", label: "Игры", ic: "game", feature: "games" },
   { id: "ideas", label: "Идеи", ic: "idea", badge: "suggestions", feature: "suggestions" },
 ];
@@ -74,6 +75,8 @@ const allowed = (id) => id === "help" || navItems().some((it) => it.id === id);
 
 // ---------- каркас ----------
 function badge(key) { return key ? h("span", { class: "count hidden", "data-badge": key }) : null; }
+
+let statusCtl = null;
 
 function renderShell() {
   const items = navItems();
@@ -101,7 +104,7 @@ function renderShell() {
   const tabsShown = items.length > 5 ? items.slice(0, 4) : items;
   const rest = items.length > 5 ? items.slice(4) : [];
   const tabbar = h("nav", { class: "tabbar", "aria-label": "Разделы" },
-    tabsShown.map((it) => h("a", { href: `#/${it.id}`, "data-nav": it.id }, icon(it.ic), h("span", { class: "t", text: it.label }), badge(it.badge))),
+    tabsShown.map((it) => h("a", { href: `#/${it.id}`, "data-nav": it.id }, icon(it.ic), h("span", { class: "t", text: it.short || it.label }), badge(it.badge))),
     rest.length ? (() => {
       const more = h("button", { type: "button", "data-more": "1" }, icon("more"), h("span", { class: "t", text: "Ещё" }), badge("more"));
       more.addEventListener("click", () => sheet({ cls: "menu-sheet", body: h("div", { class: "menu-list" },
@@ -111,7 +114,9 @@ function renderShell() {
   tabbar.style.setProperty("--tabs", tabsShown.length + (rest.length ? 1 : 0));
   state.moreIds = rest.map((it) => it.id);
 
-  fill(document.getElementById("app"), h("div", { class: "app" }, sidebar, topbar, h("main", { class: "main", id: "main", tabindex: "-1" })), tabbar);
+  if (statusCtl) statusCtl.stop();
+  statusCtl = startStatus(() => Boolean(state.me) && document.body.classList.contains("has-app"));   // пинг и время сервера — маленькой строкой сверху
+  fill(document.getElementById("app"), h("div", { class: "app" }, sidebar, topbar, statusCtl.el, h("main", { class: "main", id: "main", tabindex: "-1" })), tabbar);
   document.body.classList.add("has-app");
   paintBadges();
 }
