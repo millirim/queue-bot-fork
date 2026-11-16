@@ -28,7 +28,7 @@ import logsink
 import updater
 from db import ROLES, AuditRecord, Database, MinusRequest, Poll, Request, ServerLog, Student, parse_roster
 from features import FEATURES, ROLE_TITLES
-from ranking import WANT
+from ranking import FULL, WANT, is_full
 
 log = logging.getLogger(__name__)
 
@@ -409,7 +409,7 @@ async def show_person(target: Message | CallbackQuery, db: Database, staff: Staf
         text += "\n\n<b>Сдано</b> — нажми на предмет, чтобы поправить:"
         for subj in await db.subjects():
             _, row = await db.get_row(subj.id, s.id)
-            progress.append(btn(f"{subj.title}: {row.done}/{subj.total}{f' {WANT}' if row.wants else ''}",
+            progress.append(btn(f"{subj.title}: {row.done}/{subj.total}{f' {FULL}' if is_full(row.done, subj.total) else ''}{f' {WANT}' if row.wants else ''}",
                                 f"aqe:{subj.id}:{s.id}:p"))
     subgroups = [btn(("✓ " if s.subgroup == n else "") + t, f"aus:{s.id}:{n}")
                  for n, t in ((1, "1 подгр."), (2, "2 подгр."), (0, "без подгр."))]
@@ -698,7 +698,7 @@ async def show_progress_card(
         [back, ADMIN_BTN],
     ]
     await show(
-        cb, f"<b>{esc(subject.title)}</b>\n\n{esc(row.name)}: сдано <b>{row.done}/{subject.total}</b>, место {place}{want}",
+        cb, f"<b>{esc(subject.title)}</b>\n\n{esc(row.name)}: сдано <b>{row.done}/{subject.total}</b>{f' {FULL}' if is_full(row.done, subject.total) else ''}, место {place}{want}",
         kb(*rows), ack,
     )
 

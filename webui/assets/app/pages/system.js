@@ -1,5 +1,6 @@
 // «Система» (админы): состояние сервера, функции по ролям, копии базы, предметы и Live — вкладками.
-import { h, fill, state, api, every, onLeave, works, fmtWhen, fmtBytes, fmtDuration, pad, ROLE } from "../core.js";
+import { h, fill, state, api, every, onLeave, works, fmtWhen, fmtBytes, fmtDuration, ROLE } from "../core.js";
+import { clock, lastPing, avgPing, serverTime, uptimeSeconds } from "../status.js";
 import { button, sheet, confirm, toast, toggle, segmented, tabs, pageHead, empty, skeleton, row, label, moreButton } from "../ui.js";
 
 const TABS = [
@@ -21,30 +22,18 @@ const kv = (pairs) => h("dl", { class: "kv" }, pairs.filter(Boolean).map(([k, v]
 
 // ---------- сервер ----------
 async function status(el, token) {
-  // Пинг меряем только здесь: раз в 2 секунды, пока вкладка открыта.
-  const samples = [];
-  let uptimeAt = null, offset = null, tz = 0, lost = 0;
+  // Пинг и время сервера меряет общий модуль status.js (его же показывает строка сверху); здесь только читаем.
   const pingEl = h("span", { class: "num" }, "—"), timeEl = h("span", { class: "num" }, "—"), upEl = h("span", { class: "num" }, "—");
-  const ping = async () => {
-    const wall0 = Date.now(), t0 = performance.now();
-    try {
-      const data = await (await fetch("/api/ping", { cache: "no-store", credentials: "same-origin" })).json();
-      const rtt = performance.now() - t0;
-      samples.push({ rtt, offset: data.now - (wall0 + rtt / 2) });
-      if (samples.length > 30) samples.shift();
-      offset = samples.reduce((a, b) => (b.rtt < a.rtt ? b : a)).offset;
-      tz = data.tz; uptimeAt = { uptime: data.uptime, at: performance.now() };
-      const avg = samples.reduce((a, b) => a + b.rtt, 0) / samples.length;
-      pingEl.textContent = `${rtt.toFixed(0)} мс · ср. ${avg.toFixed(0)}` + (lost ? ` · потеряно ${lost}` : "");
-    } catch (e) { lost++; pingEl.textContent = "нет связи"; }
-  };
-  let raf = 0;
+  let tickTimer = 0;
   const tick = () => {
-    if (offset != null) { const d = new Date(Date.now() + offset + tz * 60000); timeEl.textContent = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`; }
-    if (uptimeAt) upEl.textContent = fmtDuration(uptimeAt.uptime + (performance.now() - uptimeAt.at) / 1000);
-    raf = setTimeout(tick, 250);
+    const last = lastPing(), avg = avgPing();
+    pingEl.textContent = clock.online === false ? "нет связи" : last == null ? "—" : `${Math.round(last)} мс · ср. ${Math.round(avg)}` + (clock.lost ? ` · потеряно ${clock.lost}` : "");
+    timeEl.textContent = serverTime() || "—";
+    const up = uptimeSeconds();
+    if (up != null) upEl.textContent = fmtDuration(up);
+    tickTimer = setTimeout(tick, 500);
   };
-  onLeave(() => clearTimeout(raf));
+  onLeave(() => clearTimeout(tickTimer));
 
   const draw = async () => {
     const s = await api("/api/server");
@@ -87,8 +76,7 @@ async function status(el, token) {
         h("div", { class: "actions-row" }, update, backup, h("span", { class: "grow" }), more)));
   };
   await draw();
-  ping(); tick();
-  every(2000, ping);
+  tick();
 }
 
 // ---------- функции по ролям ----------

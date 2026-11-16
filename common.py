@@ -16,7 +16,7 @@ from aiogram.types import (
 import config
 from db import ONLINE_SECONDS, Database, Poll, Student, Subject
 from features import ROLES, WEB_OVERRIDE
-from ranking import WANT, Row
+from ranking import FULL, WANT, Row, is_full
 
 log = logging.getLogger(__name__)
 
@@ -347,7 +347,8 @@ def queue_text(subject: Subject, rows: list[Row], me: int | None = None, subgrou
             text += f"\n{current}\n"
         mark = (" 🔁" if r.swapped else "") + (" 👈 <i>это ты</i>" if r.student_id == me else "")
         done = f" — {r.done}/{subject.total}" if r.in_bot or r.done else ""
-        text += f"{i}. {esc(short_name(r.name))}{done}{mark}\n"
+        star = f" {FULL}" if is_full(r.done, subject.total) else ""   # сдал всё по предмету
+        text += f"{i}. {esc(short_name(r.name))}{star}{done}{mark}\n"
     if not wanting:
         text += f"\n<i>Пока никто не нажал «{WANT} Хочу сдать следующее».</i>"
     return text

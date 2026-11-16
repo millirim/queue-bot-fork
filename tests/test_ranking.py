@@ -69,3 +69,18 @@ def test_not_in_bot_go_to_the_bottom_without_priority():
         Row(4, "Глебов", 0, False, None),                  # 0 сдано, в боте
     ]
     assert names(rows) == ["Волков", "Глебов", "Борисов", "Абрамов"]
+
+
+def test_star_marks_those_who_handed_in_everything():
+    from common import queue_text
+    from db import Subject
+    from ranking import FULL, is_full
+    assert is_full(6, 6) and is_full(7, 6) and not is_full(5, 6) and not is_full(0, 0), "предмет без работ звёздочки не даёт"
+    subject = Subject(1, "БД", 6)
+    rows = [Row(1, "Орлов Олег Олегович", 6, False, None), Row(2, "Петров Пётр Петрович", 5, False, None),
+            Row(3, "Зайцев Захар Захарович", 6, True, 1, in_bot=False)]
+    lines = queue_text(subject, order(rows)).splitlines()
+    orlov = next(x for x in lines if "Орлов" in x)
+    assert FULL in orlov and orlov.index(FULL) < orlov.index("6/6"), "звёздочка у имени, до счёта"
+    assert FULL not in next(x for x in lines if "Петров" in x)
+    assert sum(FULL in x for x in lines) == 2, "звёздочка и у не зашедшего в бота: сдано всё — это факт, а не приоритет"
