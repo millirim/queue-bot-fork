@@ -92,7 +92,23 @@
 .pk-hint .pk-btn { min-height: 40px; border-radius: 12px; font-size: 14.5px; }
 .pk-sizing { display: grid; gap: 8px; }
 .pk-quick { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; }
-.pk-btn.is-chip { min-height: 34px; padding: 0 6px; border-radius: 10px; font-size: 13.5px; background: var(--surface-2); }
+.pk-btn.is-chip { flex-direction: column; gap: 1px; min-height: 40px; padding: 0 4px; border-radius: 10px; font-size: 13.5px; line-height: 1.1; background: var(--surface-2); }
+.pk-btn.is-chip small { font-size: 11px; font-weight: 500; color: var(--text-3); }
+/* ход заранее: три флажка, выбранный подсвечен */
+.pk-pre { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.pk-pre-btn { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 0 6px; border: 1px dashed var(--border-strong); border-radius: 12px; background: none; color: var(--text-2); font: 550 13.5px var(--font); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pk-pre-btn:hover { color: var(--text); border-style: solid; }
+.pk-pre-btn.is-on { border: 1px solid var(--brand); background: var(--brand-soft); color: var(--brand-ink); }
+.pk-check { flex: none; width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid currentColor; opacity: .7; }
+.pk-pre-btn.is-on .pk-check { background: var(--brand); border-color: var(--brand); opacity: 1; box-shadow: inset 0 0 0 2px var(--surface); }
+.pk-rank { display: grid; gap: 2px; }
+.pk-rank-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 7px 0; }
+.pk-rank-row + .pk-rank-row { border-top: 1px solid var(--border); }
+.pk-rank-n { color: var(--text-3); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; }
+.pk-rank-main { display: grid; gap: 1px; min-width: 0; }
+.pk-rank-cards { display: flex; gap: 2px; }
+.pk-rank-cards .gk-card { --cw: 26px; }
+@media (max-width: 420px) { .pk-rank-row { grid-template-columns: 18px minmax(0, 1fr); } .pk-rank-cards { grid-column: 2; } .pk-pre-btn { font-size: 12.5px; gap: 4px; } }
 .pk-slide { display: flex; align-items: center; gap: 8px; }
 .pk-btn.is-step { flex: none; width: 38px; min-height: 38px; padding: 0; border-radius: 12px; font-size: 20px; font-weight: 500; }
 .pk-range { flex: 1; min-width: 0; height: 38px; margin: 0; background: none; appearance: none; -webkit-appearance: none; --fill: 0%; }
@@ -126,7 +142,8 @@
 
 @media (min-width: 700px) {
   .pk { --pk-opp: 36px; --pk-show: 50px; --pk-me: 62px; --pk-board: 58px; gap: 14px; }
-  .pk-table { aspect-ratio: 16 / 9; max-height: 62vh; }
+  /* стол не выше, чем нужно, чтобы панель хода целиком поместилась на экране без прокрутки */
+  .pk-table { aspect-ratio: 16 / 9; max-height: max(300px, calc(100vh - 410px)); }
   .pk-felt { inset: 9% 6%; border-width: 14px; }
   .pk-center { gap: 10px; width: 56%; }
   .pk-center .pk-result { display: grid; }

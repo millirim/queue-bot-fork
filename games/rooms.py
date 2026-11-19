@@ -119,6 +119,14 @@ class Room:
         paid = await self.hub.store.release(self.code, pid, amount)
         self.credited += paid
         self.settled.add(pid)
+        await self.push_chips(pid)
+
+    async def push_chips(self, pid: int) -> None:
+        """Сообщить человеку его счёт фишек (после входа за стол и возврата): экран сразу знает, хватит ли на новый вход."""
+        conn = self.hub.conns.get(pid)
+        if conn is not None:
+            chips = await self.hub.store.balance(pid)
+            await conn.send({"t": "chips", "chips": chips, "can_topup": chips < 100})
 
     async def collect_returns(self) -> None:
         """Игры на фишки (покер, «21») отдают фишки ушедших и выбывших по таймауту сразу — их нужно вернуть владельцам немедленно."""
@@ -155,9 +163,12 @@ class Room:
             if await self.hub.store.held(self.code, pid):   # встал посреди раздачи и сразу садится: старый вклад ещё не рассчитан
                 raise GameError("Твои фишки ещё в прошлой раздаче — дождись её конца и садись")
             stack = int(self.options.get("buyin", 0)) if "buyin" in self.options else int(buyin or 0)
+            have = await self.hub.store.balance(pid)
+            least = int(self.options.get("min_buyin", stack) or stack)
+            if least <= have < stack:
+                stack = have                  # как за настоящим столом: вход — диапазон; на полный не хватает — садишься со всем, что есть
             if stack <= 0 or not await self.hub.store.hold(self.code, pid, stack):
-                have = await self.hub.store.balance(pid)
-                raise GameError(f"Не хватает фишек: вход {stack}, у тебя {have}. Пополнить можно в «Играх» — нажми на свой счёт")
+                raise GameError(f"Не хватает фишек: вход от {least}, у тебя {have}. Пополнить можно в «Играх» — нажми на свой счёт")
             self.held += stack
             self.stakes[pid] = stack
         try:
@@ -170,6 +181,8 @@ class Room:
             raise
         self.seat_of[pid], self.pid_of[seat], self.names[pid] = seat, pid, player.name
         self.settled.discard(pid)
+        if stack:
+            await self.push_chips(pid)
         self.conns[pid] = conn
         self.hub.seated[pid] = self
         conn.room = self

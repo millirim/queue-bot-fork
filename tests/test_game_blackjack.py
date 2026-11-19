@@ -438,10 +438,12 @@ def test_split_plays_two_hands_in_order_and_pays_each():
     play_one(g, [("8s", "8d")], ("9c", "7d"), ["3c", "Tc", "Kh", "6s"], [100], [(0, "split")])
     v = g.view(0)
     hands = v["players"][0]["hands"]
-    assert [h["cards"] for h in hands] == [["8s", "3c"], ["8d", "Tc"]] and v["players"][0]["active_hand"] == 0
+    # как в казино: вторую карту пока получила только первая рука, вторая ждёт своей очереди с одной восьмёркой
+    assert [h["cards"] for h in hands] == [["8s", "3c"], ["8d"]] and v["players"][0]["active_hand"] == 0
     assert v["players"][0]["stack"] == 800
-    g.act(0, {"a": "hit"})                              # 11 + K = 21: рука закончена
-    assert g.view(0)["players"][0]["active_hand"] == 1
+    g.act(0, {"a": "hit"})                              # 8 + 3 + 10 = 21: рука закончена
+    hands = g.view(0)["players"][0]["hands"]
+    assert g.view(0)["players"][0]["active_hand"] == 1 and hands[1]["cards"] == ["8d", "Kh"], "очередь дошла — вторая рука получила карту"
     g.act(0, {"a": "stand"})                            # 18; крупье 16 берёт 6 и остаётся с 22
     v = g.view(0)
     assert v["dealer"]["bust"]
@@ -465,13 +467,14 @@ def test_split_aces_get_one_card_each_and_21_is_not_blackjack():
 def test_split_limit_is_three_splits_four_hands():
     g = make(1, chips=5000)
     g.start()
-    stacked(g, [("8s", "8d")], ("9c", "7d"), ["8c", "2c", "8d", "2d", "8h", "2h"])
+    stacked(g, [("8s", "8d")], ("9c", "7d"), ["8c", "8h", "8c", "2d", "2h", "2s"])
     g.act(0, {"a": "bet", "amount": 100})
     for k in range(3):
         assert "split" in g.legal(0)["actions"], k
         g.act(0, {"a": "split"})
-    assert len(g.view(0)["players"][0]["hands"]) == 4
-    assert g.view(0)["players"][0]["hands"][0]["cards"][0][0] == g.view(0)["players"][0]["hands"][0]["cards"][1][0]   # пара есть
+    hands = g.view(0)["players"][0]["hands"]
+    assert len(hands) == 4 and [len(h["cards"]) for h in hands] == [2, 1, 1, 1]
+    assert hands[0]["cards"] == ["8s", "8c"], "снова пара, но рук уже четыре"
     assert "split" not in g.legal(0)["actions"]
     before = snapshot(g)
     with pytest.raises(GameError):
@@ -489,9 +492,32 @@ def test_split_needs_chips_and_can_double_after_split():
     g.start()
     play_one(g, [("8s", "8d")], ("9c", "7d"), ["3c", "Tc", "Kd", "5c"], [100], [(0, "split")])
     assert "double" in g.legal(0)["actions"]
-    g.act(0, {"a": "double"})                           # первая рука: 8+3+K = 21 за 200
+    g.act(0, {"a": "double"})                           # первая рука: 8+3+10 = 21 за 200
     hands = g.view(0)["players"][0]["hands"]
-    assert hands[0]["bet"] == 200 and hands[0]["cards"] == ["8s", "3c", "Kd"]
+    assert hands[0]["bet"] == 200 and hands[0]["cards"] == ["8s", "3c", "Tc"]
+    assert hands[1]["cards"] == ["8d", "Kd"] and g.view(0)["players"][0]["active_hand"] == 1
+
+
+def test_split_again_when_the_next_hand_gets_a_pair():
+    """Пара пришла второй руке, когда до неё дошла очередь, — её тоже можно разделить (пока рук меньше четырёх)."""
+    g = make(1)
+    g.start()
+    play_one(g, [("8s", "8d")], ("9c", "7d"), ["Tc", "8h", "3c", "Kd"], [100], [(0, "split")])
+    g.act(0, {"a": "stand"})                            # первая рука 18; вторая получает 8 — снова пара
+    hands = g.view(0)["players"][0]["hands"]
+    assert hands[1]["cards"] == ["8d", "8h"] and "split" in g.legal(0)["actions"]
+    g.act(0, {"a": "split"})
+    hands = g.view(0)["players"][0]["hands"]
+    assert [h["cards"] for h in hands] == [["8s", "Tc"], ["8d", "3c"], ["8h"]] and g.view(0)["players"][0]["active_hand"] == 1
+
+
+def test_split_hand_with_21_on_two_cards_is_done_and_play_moves_on():
+    g = make(1)
+    g.start()
+    play_one(g, [("Ts", "Td")], ("9c", "7d"), ["Ac", "5h"], [100], [(0, "split")])
+    hands = g.view(0)["players"][0]["hands"]
+    assert hands[0]["done"] and hands[0]["total"] == 21 and not hands[0]["natural"], "10 + туз после сплита — 21, но не блэкджек"
+    assert g.view(0)["players"][0]["active_hand"] == 1 and hands[1]["cards"] == ["Td", "5h"]
 
 
 # ================= закрытая карта =================
@@ -613,13 +639,14 @@ def test_shoe_is_reshuffled_below_25_percent():
     assert len(g2.shoe) < 200
 
 
-def test_shoe_has_all_cards_of_all_decks():
+def test_shoe_has_all_cards_of_all_decks_and_the_first_is_burned():
+    from collections import Counter
     for decks in (1, 2, 6, 8):
         g = make(1, decks=decks)
         g.start()
-        assert len(g.shoe) == 52 * decks
-        from collections import Counter
-        assert set(Counter(g.shoe).values()) == {decks}
+        assert len(g.shoe) == 52 * decks - 1, "после тасовки первая карта сожжена"
+        assert set(Counter(g.shoe + [g.burned]).values()) == {decks}
+        assert "burned" not in json.dumps([g.view(None), g.view(0)]), "сожжённую карту никто не видит"
 
 
 def test_shoe_running_out_mid_round_is_replaced_without_duplicating_table_cards():
@@ -1062,7 +1089,7 @@ def test_final_payouts_equal_remaining_chips():
 def test_act_is_fast_even_with_many_splits():
     g = make(1, chips=100000, decks=8, max_bet=500)
     g.start()
-    stacked(g, [("8s", "8d")], ("9c", "7d"), ["8c", "2c", "8d", "2d", "8h", "2h"])
+    stacked(g, [("8s", "8d")], ("9c", "7d"), ["8c", "8h", "8c", "2d", "2h", "2s"])
     g.act(0, {"a": "bet", "amount": 100})
     worst = 0.0
     for _ in range(3):
