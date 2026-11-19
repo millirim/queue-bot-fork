@@ -288,3 +288,29 @@ def test_solo_2048_and_snake_are_verified_by_replay(tmp_path):
         finally:
             await client.close(); await store.close()
     run(scenario())
+
+
+def test_buyin_is_a_range_sit_with_everything_above_the_minimum(tmp_path):
+    """Вход за стол на фишки — диапазон: на полный не хватает, но есть хотя бы минимум — садишься со всем, что есть."""
+    async def scenario():
+        store, client = await boot(tmp_path)
+        try:
+            a = await connect(client, 1, "Аня")
+            await a.send_json({"t": "create", "kind": "poker", "options": {"small_blind": 10, "buyin": 5000}})
+            msg = await until(a, "state")
+            assert msg["room"]["options"]["min_buyin"] == 400 and msg["room"]["options"]["buyin"] == 5000
+            me = next(p for p in msg["view"]["players"] if p["seat"] == msg["seat"])
+            assert me["stack"] == 1000 and await store.balance(1) == 0, "сел со всеми своими 1000 вместо 5000"
+            await a.send_json({"t": "leave"}); await until(a, "left")
+            assert await store.balance(1) == 1000
+            await store.db.execute("UPDATE players SET chips = 300 WHERE id = 1"); await store.db.commit()
+            await a.send_json({"t": "create", "kind": "poker", "options": {"small_blind": 10, "buyin": 1000}})
+            err = await until(a, "err")
+            assert "от 400" in err["text"] and "300" in err["text"], "меньше минимума — не садимся, и сказано, сколько нужно"
+            await a.send_json({"t": "create", "kind": "blackjack", "options": {"min_bet": 10, "buyin": 2000}})
+            msg = await until(a, "state")
+            assert msg["room"]["options"]["min_buyin"] == 50 and next(p for p in msg["view"]["players"] if p["seat"] == msg["seat"])["stack"] == 300
+            await a.close()
+        finally:
+            await client.close(); await store.close()
+    run(scenario())

@@ -73,6 +73,7 @@
       send: (a) => send({ t: "act", a }),
       onState(fn) { handlers.push(fn); if (last) fn(last); return () => { handlers = handlers.filter((x) => x !== fn); }; },
       sit() { if (room) send({ t: "join", room: room.room.code }); },   // зритель садится за стол (или возвращается после вылета)
+      topup() { send({ t: "topup" }); },                               // пополнить фишки (раз в сутки, если меньше 100)
       invite: () => inviteSheet(),
       copyLink,
     });
@@ -224,6 +225,9 @@
       sheet({ title: (g.solo ? "Рекорды · " : "Победы и поражения · ") + g.title, body: rows.length ? h("div", { class: "list" }, rows) : A.emptyState("Пока пусто", "Сыграй первым.") });
     };
 
+    // Счёт фишек изменился, а стол — нет: экран игры перерисовывает панель (хватает ли на вход, можно ли пополнить).
+    const redispatch = () => { if (mode === "room" && last) for (const fn of handlers) { try { fn(last); } catch (e) { /* экран игры сам разберётся */ } } };
+
     // --- сообщения службы ---
     const onMessage = (msg) => {
       switch (msg.t) {
@@ -238,8 +242,8 @@
         case "err": toast(msg.text, true); if (pending) { pending.reject(new Error(msg.text)); pending = null; } break;
         case "solo_seed": if (pending && pending.kind === "solo_seed") { pending.resolve(msg); pending = null; } break;
         case "solo_result": if (me) me.best = Object.assign(me.best || {}, { [msg.kind]: msg.best }); if (pending && pending.kind === "solo_result") { pending.resolve(msg); pending = null; } break;
-        case "topup": toast(msg.ok ? `Фишки пополнены: ${K.fmt(msg.chips)}` : "Пополнить можно раз в сутки и когда фишек меньше 100", !msg.ok); setChips(msg.chips); break;
-        case "chips": setChips(msg.chips); break;
+        case "topup": toast(msg.ok ? `Фишки пополнены: ${K.fmt(msg.chips)}` : "Пополнить можно раз в сутки и когда фишек меньше 100", !msg.ok); setChips(msg.chips); redispatch(); break;
+        case "chips": setChips(msg.chips); lobby.can_topup = !!msg.can_topup; redispatch(); break;
         case "board": boardSheet(msg); break;
         default: break;
       }

@@ -94,5 +94,20 @@
     };
   }
 
-  window.QB_KIT = { h, fmt, signed, clamp, card, cardText, rankText, SUIT, avatar, chips, hue, initials, shortName, countdown, lockable };
+  // Панель зрителя за столом на фишки: «Сесть за стол», а если фишек на вход не хватает — сколько нужно и «Пополнить».
+  function sitPanel(api, buyin, free, cls, least) {
+    const have = typeof api.chips === "number" ? api.chips : null;
+    least = least || buyin;
+    const row = (text, extra) => h("div", { class: cls }, h("span", { text }), extra || null);
+    const button = (text, onclick, kind, act) => h("button", { class: "gk-btn " + (kind || ""), type: "button", onclick, "data-act": act }, text);
+    if (!free) return row("Ты смотришь игру. Свободных мест нет.");
+    if (have !== null && have < least) {
+      return row("Чтобы сесть, нужно хотя бы " + fmt(least) + " фишек, у тебя " + fmt(have) + ".",
+        have < 100 ? button("Пополнить", () => api.topup && api.topup(), "is-primary", "topup") : null);
+    }
+    const take = have === null ? buyin : Math.min(have, buyin);   // на полный вход не хватает — садишься со всем, что есть
+    return row("Ты смотришь игру.", button("Сесть за стол · " + fmt(take), () => api.sit && api.sit(), "is-primary", "sit"));
+  }
+
+  window.QB_KIT = { h, fmt, signed, clamp, card, cardText, rankText, SUIT, avatar, chips, hue, initials, shortName, countdown, lockable, sitPanel };
 })();

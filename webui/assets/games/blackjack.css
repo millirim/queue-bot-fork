@@ -23,6 +23,8 @@
 .bj-total { display: inline-grid; place-items: center; min-width: 30px; height: 24px; padding: 0 8px; border-radius: 99px; background: rgba(0, 0, 0, .42); color: #fff; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .bj-total.is-bust { background: var(--bad); }
 .bj-total.is-bj { background: var(--gold); color: #2a2005; }
+.bj-total.is-wait { background: rgba(0, 0, 0, .28); font-weight: 500; opacity: .8; }
+.bj-dealer-rule { margin-top: -4px; font-size: 11.5px; opacity: .55; }
 
 /* ---------- середина ---------- */
 .bj-mid { display: grid; gap: 8px; justify-items: center; min-height: 30px; align-content: center; width: 100%; }
@@ -32,7 +34,8 @@
 .bj-bar i { display: block; width: 100%; height: 100%; background: rgba(255, 255, 255, .75); transition: width .1s linear; }
 
 /* ---------- игроки ---------- */
-.bj-seats { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px 10px; width: 100%; }
+/* Места справа налево: первое место (с него крупье начинает сдачу и ходы) — по левую руку крупье, то есть справа, если смотреть со стороны игроков. */
+.bj-seats { display: flex; flex-direction: row-reverse; flex-wrap: wrap; justify-content: center; gap: 14px 10px; width: 100%; }
 .bj-seat { display: grid; justify-items: center; gap: 6px; align-content: end; min-width: 96px; flex: 0 1 auto; }
 .bj-hands { display: flex; gap: 8px; align-items: flex-end; justify-content: center; }
 .bj-hand { display: grid; justify-items: center; gap: 4px; padding: 4px; border-radius: 12px; border: 1.5px solid transparent; transition: border-color .2s, background .2s; }
@@ -88,6 +91,10 @@
 .bj-btn.is-primary { background: var(--brand); border-color: var(--brand); color: var(--brand-text); }
 .bj-btn.is-primary:hover { background: color-mix(in srgb, var(--brand) 88%, #000); }
 .bj-btn.is-small { min-height: 38px; border-radius: 12px; font-size: 14px; background: var(--surface-2); }
+/* совет базовой стратегии: кнопку обводит тонкая золотая рамка */
+.bj-btn.is-hint { box-shadow: 0 0 0 2px var(--gold); }
+.bj-btn.is-primary.is-hint { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--gold); }
+.bj-tip { padding: 2px 9px; border-radius: 8px; background: color-mix(in srgb, var(--gold) 22%, transparent); color: var(--text); font-size: 12.5px; font-weight: 600; }
 .bj-hint .bj-btn { min-height: 40px; border-radius: 12px; font-size: 14.5px; }
 .bj-betrow { display: flex; align-items: center; gap: 12px; }
 .bj-chiprow { flex: 1; display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
@@ -114,6 +121,8 @@
 .bj-rules dd { margin: 0; color: var(--text-2); }
 
 @keyframes bj-pop { from { opacity: 0; transform: scale(.8); } }
+.is-late { animation: bj-fade .2s ease-out backwards; }
+@keyframes bj-fade { from { opacity: 0; } }
 
 @media (min-width: 700px) {
   .bj { --bj-card: 56px; --bj-dealer: 66px; gap: 14px; }

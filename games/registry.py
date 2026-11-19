@@ -83,10 +83,13 @@ def clean_options(info: GameInfo, raw: Any) -> dict[str, Any]:
         elif spec["type"] == "choice":
             value = value if value in spec["choices"] else spec["default"]
         out[key] = value
+    # buyin — сколько берёшь за стол; min_buyin — меньше нельзя. Не хватает на buyin, но есть хотя бы min_buyin — садишься со всем, что есть.
     if info.kind == "poker":
         out["big_blind"] = out["small_blind"] * 2
-        out["buyin"] = max(out["buyin"], out["big_blind"] * 20)  # меньше 20 больших блайндов за стол не садимся
+        out["min_buyin"] = out["big_blind"] * 20                  # меньше 20 больших блайндов за стол не садимся
+        out["buyin"] = max(out["buyin"], out["min_buyin"])
     if info.kind == "blackjack":
         out["max_bet"] = max(out["max_bet"], out["min_bet"])
-        out["buyin"] = max(out["buyin"], out["min_bet"] * 5)
+        out["min_buyin"] = out["min_bet"] * 5
+        out["buyin"] = max(out["buyin"], out["min_buyin"])
     return out

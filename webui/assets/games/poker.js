@@ -17,6 +17,19 @@
     },
   };
   const STREET = { preflop: "Префлоп", flop: "Флоп", turn: "Тёрн", river: "Ривер" };
+  // Комбинации от сильной к слабой — для справки «Комбинации» (пример из пяти карт и одна строка пояснения).
+  const RANKING = [
+    ["Роял-флеш", "AsKsQsJsTs", "Десятка, валет, дама, король, туз одной масти"],
+    ["Стрит-флеш", "9h8h7h6h5h", "Пять карт подряд одной масти"],
+    ["Каре", "QcQdQhQs7d", "Четыре одинаковые"],
+    ["Фулл-хаус", "KcKdKh4s4d", "Три одинаковые и пара"],
+    ["Флеш", "AdJd8d6d2d", "Пять карт одной масти"],
+    ["Стрит", "Tc9d8h7s6c", "Пять карт подряд, масть любая"],
+    ["Сет", "7c7d7hKs2d", "Три одинаковые"],
+    ["Две пары", "JcJd4h4sAd", "Две разные пары"],
+    ["Пара", "AcAd9h6s3c", "Две одинаковые"],
+    ["Старшая карта", "AcJd8h5s3c", "Ничего не собралось — решает старшая карта"],
+  ];
 
   // ---------- SHA-256 (запасной вариант, если нет crypto.subtle: страница открыта не по https) ----------
   function sha256Fallback(text) {
@@ -76,6 +89,8 @@
     let seenHand = -1;
     let seen = new Set();
     let wasMyTurn = false;
+    let pre = null;              // ход заранее, пока ходят другие: { kind: "checkfold"|"check"|"call"|"callany", amount, hand }
+    let preTimer = 0;
     const hashSeen = {};          // хэш колоды, который мы видели ДО конца раздачи: с ним сверяем раскрытие
 
     const el = {
@@ -132,7 +147,7 @@
       if (p.won > 0) say = h("span", { class: "pk-say is-win", text: "+" + fmt(p.won) });
       else if (p.hand && shown && !live) say = h("span", { class: "pk-say", text: p.hand });
       else if (live && p.bet > 0) say = h("span", { class: "pk-say is-bet" + (p.status === "allin" ? " is-allin" : "") }, K.chips(p.bet));
-      else if (live && p.status === "allin") say = h("span", { class: "pk-say is-allin", text: "олл-ин" });
+      else if (live && p.status === "allin") say = h("span", { class: "pk-say is-allin", text: "ва-банк" });
       else if (live && p.status === "folded") say = h("span", { class: "pk-say is-fold", text: "пас" });
       else if (live && /^чек/.test(p.last || "")) say = h("span", { class: "pk-say", text: "чек" });
       const node = h("div", { class: "pk-seat" + (isMe ? " is-me" : "") + (isTurn ? " is-turn" : "") + (gone ? " is-gone" : "") + (shown ? " is-shown" : "") + (p.won > 0 ? " is-winner" : ""), "data-seat": p.seat },
@@ -237,10 +252,12 @@
       range.addEventListener("input", () => set(range.value));
       input.addEventListener("input", () => { if (input.value !== "") { raiseValue = clamp(Math.round(Number(input.value) || lo), lo, hi); range.value = raiseValue; go.textContent = raiseValue >= hi ? "Ва-банк " + fmt(hi) : word + fmt(raiseValue); } });
       input.addEventListener("change", () => { set(input.value); input.value = raiseValue; });
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); set(input.value); go.click(); } });
       const pot = (frac) => Math.round(v.current_bet + frac * (v.pot + v.to_call));
       const quick = [["Мин", lo], ["½", pot(0.5)], ["¾", pot(0.75)], ["Банк", pot(1)], ["Всё", hi]].filter(([, n], i, all) => i === 0 || i === all.length - 1 || (n > lo && n < hi));
       const sizing = h("div", { class: "pk-sizing" },
-        h("div", { class: "pk-quick" }, quick.map(([t, n]) => btn(t, () => set(n), "is-chip"))),
+        h("div", { class: "pk-quick" }, quick.map(([t, n]) => h("button", { class: "pk-btn is-chip", type: "button", onclick: () => set(n), title: "Ставка до " + fmt(n) },
+          h("span", { text: t }), h("small", { text: fmt(n) })))),
         h("div", { class: "pk-slide" }, btn("−", () => set(raiseValue - bb), "is-step", { "aria-label": "Меньше" }), range, btn("+", () => set(raiseValue + bb), "is-step", { "aria-label": "Больше" }), input));
       paint();
       return { sizing, go };
@@ -253,8 +270,8 @@
       const hint = (text, extra) => h("div", { class: "pk-hint" }, h("span", { text }), extra || null);
       if (v.me === null || v.me === undefined) {
         if (v.phase === "finished") return [hint("Стол закрыт.")];
-        const buyin = v.options && v.options.buyin;
-        return [hint("Ты смотришь игру.", v.can_sit ? btn("Сесть за стол · " + fmt(buyin), () => api.sit && api.sit(), "is-primary", { "data-act": "sit" }) : h("span", { class: "pk-muted", text: "Мест нет" }))];
+        const buyin = (state.room && state.room.options && state.room.options.buyin) || (v.options && v.options.buyin) || 0;
+        return [K.sitPanel(api, buyin, v.can_sit, "pk-hint", state.room && state.room.options && state.room.options.min_buyin)];
       }
       if (v.phase === "lobby") {
         if (acts.includes("start")) return [h("div", { class: "pk-actions is-one" }, btn("Начать игру", () => send({ a: "start" }), "is-primary", { "data-act": "start" }))];
@@ -283,13 +300,58 @@
       if (m && m.status === "waiting") return [hint("Ты в игре со следующей раздачи.")];
       if (m && m.status === "folded") return [hint("Ты сбросил. Ждём следующую раздачу.")];
       if (m && m.status === "allin") return [hint("Ты поставил всё. Смотрим карты.")];
-      return [hint("Ходит " + nameOf(v, v.turn).split(" ")[0] + ".")];
+      const parts = [hint("Ходит " + nameOf(v, v.turn).split(" ")[0] + ".", h("span", { class: "pk-muted", text: "можно выбрать ход заранее" }))];
+      if (m && m.status === "active" && v.phase in STREET) parts.push(preRow(v, m));
+      return parts;
+    }
+
+    // ---------- ход заранее ----------
+    // Пока ходят другие, можно отметить, что сделать в свой ход. Как только очередь дойдёт — ход уйдёт сам.
+    // «Колл N» снимается, если ставку перебили; «Чек» — если кто-то поставил. Новая раздача — всё сбрасывается.
+    const owed = (v, m) => Math.min(Math.max(0, v.current_bet - m.bet), m.stack);
+    function preRow(v, m) {
+      const need = owed(v, m);
+      const options = [["checkfold", need ? "Пас" : "Чек / пас"]];
+      if (need === 0) options.push(["check", "Чек"]);
+      else options.push(["call", (need >= m.stack ? "Ва-банк " : "Колл ") + fmt(need)]);
+      options.push(["callany", "Колл любую"]);
+      return h("div", { class: "pk-pre" }, options.map(([kind, text]) => {
+        const on = pre && pre.kind === kind;
+        return h("button", { class: "pk-pre-btn" + (on ? " is-on" : ""), type: "button", "aria-pressed": String(!!on), onclick: () => {
+          pre = on ? null : { kind, amount: need, hand: v.hand };
+          controlsSig = "";
+          drawDock(state.view);
+        } }, h("i", { class: "pk-check", "aria-hidden": "true" }), text);
+      }));
+    }
+    function checkPre(v) {
+      const m = mine(v);
+      if (!pre) return;
+      if (!m || pre.hand !== v.hand || !(v.phase in STREET) || m.status !== "active") { pre = null; return; }
+      if (v.turn === v.me) return;
+      const need = owed(v, m);
+      if ((pre.kind === "check" && need > 0) || (pre.kind === "call" && need !== pre.amount)) pre = null;   // ставку перебили — решай заново
+    }
+    function firePre(v) {
+      const acts = v.actions || [];
+      const p = pre;
+      pre = null;
+      let action = null;
+      if (p.kind === "checkfold") action = acts.includes("check") ? { a: "check" } : { a: "fold" };
+      else if (p.kind === "check" && acts.includes("check")) action = { a: "check" };
+      else if (p.kind === "call" && acts.includes("call") && v.to_call === p.amount) action = { a: "call" };
+      else if (p.kind === "callany") action = acts.includes("check") ? { a: "check" } : acts.includes("call") ? { a: "call" } : acts.includes("allin") ? { a: "allin" } : null;
+      if (!action) return;
+      clearTimeout(preTimer);
+      preTimer = setTimeout(() => { if (state && state.view && state.view.turn === state.view.me && state.view.hand === p.hand) send(action); }, 350);   // короткая пауза: видно, что ход ушёл сам
     }
 
     function drawDock(v) {
       const m = mine(v);
       const myTurn = v.me !== null && v.me !== undefined && v.turn === v.me;
-      const sig = JSON.stringify([v.phase, v.turn, v.me, v.actions, v.to_call, v.min_raise_to, v.max_raise_to, v.pot, v.current_bet, m && m.stack, m && m.status, m && m.won, v.hand, v.can_sit, v.host, v.players.length]);
+      checkPre(v);
+      if (myTurn && !wasMyTurn && pre) firePre(v);
+      const sig = JSON.stringify([v.phase, v.turn, v.me, v.actions, v.to_call, v.min_raise_to, v.max_raise_to, v.pot, v.current_bet, m && m.stack, m && m.status, m && m.won, v.hand, v.can_sit, v.host, v.players.length, pre, api.chips]);
       if (sig !== controlsSig) {
         controlsSig = sig;
         raiseValue = 0;
@@ -310,9 +372,19 @@
     function drawFoot(v) {
       const parts = [h("span", { class: "pk-blinds", text: "Блайнды " + fmt(v.blinds.small) + " / " + fmt(v.blinds.big) + (v.hand ? " · раздача " + v.hand : "") })];
       parts.push(h("span", { class: "pk-grow" }));
+      parts.push(h("button", { class: "pk-link", type: "button", onclick: () => showRanking() }, "Комбинации"));
       if ((v.log || []).length) parts.push(h("button", { class: "pk-link", type: "button", onclick: () => showLog() }, "История"));
       if (v.deck_hash || v.reveal || v.prev_reveal) parts.push(h("button", { class: "pk-link", type: "button", onclick: () => showFair() }, "Честная колода"));
       el.foot.replaceChildren(...parts);
+    }
+    function showRanking() {
+      api.sheet({ title: "Комбинации", body: [
+        h("p", { class: "muted small", text: "Сверху — самая сильная. Из своих двух и пяти общих карт берутся лучшие пять." }),
+        h("div", { class: "pk-rank" }, RANKING.map(([name, cards, note], i) => h("div", { class: "pk-rank-row" },
+          h("span", { class: "pk-rank-n", text: String(i + 1) }),
+          h("div", { class: "pk-rank-main" }, h("b", { text: name }), h("span", { class: "muted small", text: note })),
+          h("div", { class: "pk-rank-cards" }, cards.match(/../g).map((c) => K.card(c, { size: "sm" })))))),
+        h("p", { class: "muted small", text: "Клавиши: F — пас, C или пробел — чек или колл, R — рейз." })] });
     }
     function showLog() {
       const v = state.view;
@@ -380,6 +452,15 @@
       drawTimer(v);
     }
 
+    // Клавиши на компьютере: F — пас, C или пробел — чек / колл, R — рейз (ставка из ползунка).
+    const onKey = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || "") || document.querySelector(".sheet-wrap")) return;
+      const pick = (...acts) => acts.map((a) => el.dock.querySelector(`[data-act="${a}"]`)).find(Boolean);
+      const b = e.code === "KeyF" ? pick("fold") : e.code === "KeyC" || e.code === "Space" ? pick("check", "call") : e.code === "KeyR" ? pick("raise") : null;
+      if (b) { e.preventDefault(); b.click(); }
+    };
+    document.addEventListener("keydown", onKey);
+
     const off = api.onState((s) => {
       state = s || null;
       if (state && state.view && (state.view.me === undefined || state.view.me === null) && state.seat !== undefined && state.seat !== null) state.view.me = state.seat;
@@ -392,6 +473,8 @@
       stopTimer();
       lock.unlock();
       wide.removeEventListener("change", onResize);
+      document.removeEventListener("keydown", onKey);
+      clearTimeout(preTimer);
       if (typeof off === "function") off();
       root.replaceChildren();
     };
